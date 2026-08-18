@@ -7,10 +7,10 @@ A specialized `kubectl` plugin designed to collect deep diagnostic information f
 Install the plugin globally using the following command:
 
 ```
-curl -sSfL https://github.com/erswapnil/kubectl-cnp-diagnostic/raw/main/install.sh | sudo sh
+curl -sSfL https://github.com/EnterpriseDB/kubectl-cnp-diagnostic/raw/main/install.sh | sh
 ```
 
-> **Note**: This script downloads the `kubectl-edbdiag` binary, installs it to `/usr/local/bin`, and adds that path to your shell's PATH if it isn't already there — so both `kubectl edbdiag` and a bare `kubectl-edbdiag` work afterwards.
+> **Note**: This script downloads the `kubectl-edbdiag` binary, installs it to `~/.local/bin`, and adds that path to your shell's PATH if it isn't already there — so both `kubectl edbdiag` and a bare `kubectl-edbdiag` work afterwards.
 
 ## 🪟 Windows Installation
 
