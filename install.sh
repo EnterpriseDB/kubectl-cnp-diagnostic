@@ -2,7 +2,7 @@
 set -e
 
 # Repository Configuration
-OWNER="erswapnil"
+OWNER="EnterpriseDB"
 REPO="kubectl-cnp-diagnostic"
 # This MUST start with kubectl- to be recognized as a plugin
 BINARY="kubectl-edbdiag"
