@@ -1,0 +1,675 @@
+#!/usr/bin/env bash
+# ============================================================
+#  EDB / Postgres Cluster Diagnostic Collector (kubectl-edbdiag)
+#  Supports:
+#    1) CNP   - EDB Postgres for Kubernetes
+#    2) CNPG  - CloudNativePG (community)
+#    3) PGD4K - EDB Postgres Distributed for Kubernetes
+#  Works against plain Kubernetes (kubectl) or OpenShift (oc) - auto-detected.
+# ============================================================
+
+set -uo pipefail
+
+# ------------------------------------------------------------
+# 0. PRE-FLIGHT CHECKS + CLI DETECTION (oc vs kubectl)
+# ------------------------------------------------------------
+check_cmd() {
+    if ! command -v "$1" &>/dev/null; then
+        echo "ERROR: Required command '$1' not found. Please install it and re-run."
+        exit 1
+    fi
+}
+check_cmd tar
+
+# Prefer `oc` only when it's installed AND the current context is actually
+# pointed at a real OpenShift API server; otherwise fall back to `kubectl`.
+# `oc whoami` alone is NOT a reliable check - it can report a user even
+# against a plain/kind/vanilla Kubernetes cluster (it can resolve from the
+# local kubeconfig without the server ever confirming it's OpenShift), which
+# caused false "Detected OpenShift context" results on non-OpenShift
+# clusters. Instead, check for an OpenShift-only API group (route.openshift.io,
+# i.e. Routes) which only exists on genuine OpenShift - this requires a real
+# round-trip to the API server's discovery endpoint.
+KCMD=""
+IS_OPENSHIFT=false
+if command -v oc &>/dev/null && oc api-resources 2>/dev/null | grep -q 'route.openshift.io'; then
+    IS_OPENSHIFT=true
+fi
+
+if [ "$IS_OPENSHIFT" = true ]; then
+    KCMD="oc"
+    echo "Detected OpenShift context - using 'oc' for all cluster commands."
+elif command -v kubectl &>/dev/null; then
+    KCMD="kubectl"
+    echo "Using 'kubectl' for all cluster commands."
+elif command -v oc &>/dev/null; then
+    # No kubectl available and this isn't confirmed OpenShift either, but oc
+    # is still usable for most read verbs against the current kubeconfig.
+    KCMD="oc"
+    echo "WARNING: 'kubectl' not found and OpenShift not detected - proceeding with 'oc' anyway."
+else
+    echo "ERROR: Neither 'oc' nor 'kubectl' found. Please install one and re-run."
+    exit 1
+fi
+
+YQ_AVAILABLE=false
+if command -v yq &>/dev/null; then
+    YQ_AVAILABLE=true
+else
+    echo "WARNING: 'yq' not found - cluster YAML will be saved as-is (no field stripping)."
+    echo "         Install yq (https://github.com/mikefarah/yq) for a cleaner output."
+    echo ""
+fi
+
+# Portable replacement for `mapfile`/`readarray` (bash 4+ only). macOS ships
+# bash 3.2 by default, which does not have mapfile - this was the root cause
+# of the "mapfile: command not found" errors seen when running the plugin.
+collect_lines() {
+    # usage: collect_lines ARRAY_NAME <<< "$(some command)"
+    local __name="$1"
+    local __line
+    eval "$__name=()"
+    while IFS= read -r __line; do
+        [[ -z "${__line// /}" ]] && continue
+        eval "$__name+=(\"\$__line\")"
+    done
+}
+
+lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# Exit cleanly from any prompt if the user types q/quit/exit instead of a
+# valid choice, rather than silently falling through to a default.
+check_quit() {
+    case "$1" in
+        q|Q|quit|Quit|QUIT|exit|Exit|EXIT)
+            echo "Exiting - no diagnostics collected."
+            exit 0
+            ;;
+    esac
+}
+
+# Save one container's current + previous logs, both to the nested
+# pod-specific location AND to the flat, all-in-one-place $PODLOGS_DIR, so
+# logs can be grepped across every pod without walking the whole tree.
+#   save_container_log <namespace> <pod> <container> <nested_dir>
+save_container_log() {
+    local ns="$1" pod="$2" container="$3" nested_dir="$4"
+    local flat_name="${ns}__${pod}__${container}"
+
+    "$KCMD" logs "$pod" -n "$ns" -c "$container" \
+        > "$nested_dir/${container}.log" 2>/dev/null || true
+    "$KCMD" logs "$pod" -n "$ns" -c "$container" --previous \
+        > "$nested_dir/${container}_previous.log" 2>/dev/null || true
+
+    cp -f "$nested_dir/${container}.log" "$PODLOGS_DIR/${flat_name}.log" 2>/dev/null || true
+    cp -f "$nested_dir/${container}_previous.log" "$PODLOGS_DIR/${flat_name}_previous.log" 2>/dev/null || true
+}
+
+# Discover and save every container + init container's logs for a pod.
+#   save_all_pod_logs <namespace> <pod> <nested_dir>
+save_all_pod_logs() {
+    local ns="$1" pod="$2" nested_dir="$3"
+    local containers
+    containers=$("$KCMD" get pod "$pod" -n "$ns" \
+        -o jsonpath='{range .spec.containers[*]}{.name}{" "}{end}{range .spec.initContainers[*]}{.name}{" "}{end}' \
+        2>/dev/null)
+
+    if [ -z "$containers" ]; then
+        # Fall back to a single unnamed log capture if container discovery
+        # itself failed for some reason, so pod-logs is never silently empty.
+        "$KCMD" logs "$pod" -n "$ns" > "$nested_dir/pod.log" 2>/dev/null || true
+        cp -f "$nested_dir/pod.log" "$PODLOGS_DIR/${ns}__${pod}.log" 2>/dev/null || true
+        return
+    fi
+
+    for c in $containers; do
+        save_container_log "$ns" "$pod" "$c" "$nested_dir"
+    done
+}
+
+# ------------------------------------------------------------
+# 1. OPERATOR VARIANT SELECTION (always asked first now)
+# ------------------------------------------------------------
+echo "Select Operator Variant:"
+echo "  1) EDB Postgres® AI for CloudNativePG™ Cluster (CNP)"
+echo "  2) CloudNativePG™ (CNPG)"
+echo "  3) EDB Postgres® AI for CloudNativePG™ Global Cluster (PGD4K)"
+echo "  q) Quit"
+read -rp "Enter choice [1-3, or q to quit]: " VARIANT_CHOICE
+check_quit "$VARIANT_CHOICE"
+
+IS_PGD=false
+case "$VARIANT_CHOICE" in
+    1) OP_CMD="cnp"  ;;
+    2) OP_CMD="cnpg" ;;
+    3) OP_CMD="cnp"; IS_PGD=true ;;
+    *) echo "Invalid choice, defaulting to CNPG."; OP_CMD="cnpg" ;;
+esac
+
+VARIANT_LABEL="CNP"
+[ "$OP_CMD" = "cnpg" ] && VARIANT_LABEL="CNPG"
+[ "$IS_PGD" = true ] && VARIANT_LABEL="PGD4K"
+VARIANT_LOWER=$(lower "$VARIANT_LABEL")
+
+echo ""
+echo "=== Discovering ${VARIANT_LABEL} clusters in your Kubernetes context ==="
+echo ""
+
+# ------------------------------------------------------------
+# 2. CLUSTER DISCOVERY & SCOPE SELECTION
+# ------------------------------------------------------------
+TARGETS=()   # each entry: "namespace|clustername"
+
+collect_lines ALL_CLUSTERS_RAW <<< "$("$KCMD" get cluster -A --no-headers \
+    -o custom-columns="NS:.metadata.namespace,NAME:.metadata.name" 2>/dev/null)"
+
+if [ "$IS_PGD" = true ]; then
+    # PGD4K: each BDR/PGD node is its own Cluster CR, so namespace and cluster
+    # name are NOT fixed to a single value. Default to discovering every
+    # Cluster CR so the whole PGD group gets collected in one pass.
+    if [ ${#ALL_CLUSTERS_RAW[@]} -eq 0 ]; then
+        echo "No clusters auto-detected. Falling back to manual entry."
+        read -rp "Enter the Namespace of the PGD cluster/node (or q to quit): " NAMESPACE
+        check_quit "$NAMESPACE"
+        read -rp "Enter the Cluster (node) Name (or q to quit): " CLUSTER_NAME
+        check_quit "$CLUSTER_NAME"
+        TARGETS+=("${NAMESPACE}|${CLUSTER_NAME}")
+    else
+        echo "Detected PGD4K node clusters:"
+        for i in "${!ALL_CLUSTERS_RAW[@]}"; do
+            NS=$(awk '{print $1}' <<< "${ALL_CLUSTERS_RAW[$i]}")
+            NAME=$(awk '{print $2}' <<< "${ALL_CLUSTERS_RAW[$i]}")
+            printf "  %2d) %-30s (namespace: %s)\n" "$((i+1))" "$NAME" "$NS"
+        done
+        echo ""
+        echo "Select scope:"
+        echo "  a) Collect ALL PGD4K nodes/clusters listed above (recommended - needed for group-level BDR/Raft diagnostics)"
+        echo "  n) Collect only clusters within one specific namespace"
+        echo "  m) Enter a single namespace + cluster manually"
+        echo "  q) Quit"
+        read -rp "Enter choice [a/n/m/q] (default a): " PGD_SCOPE
+        check_quit "$PGD_SCOPE"
+
+        case "$PGD_SCOPE" in
+            n|N)
+                read -rp "Enter the namespace to scope to: " SCOPE_NS
+                check_quit "$SCOPE_NS"
+                for entry in "${ALL_CLUSTERS_RAW[@]}"; do
+                    NS=$(awk '{print $1}' <<< "$entry")
+                    NAME=$(awk '{print $2}' <<< "$entry")
+                    [ "$NS" = "$SCOPE_NS" ] && TARGETS+=("${NS}|${NAME}")
+                done
+                ;;
+            m|M)
+                read -rp "Enter the Namespace of the Cluster (or q to quit): " NAMESPACE
+                check_quit "$NAMESPACE"
+                read -rp "Enter the Cluster Name (or q to quit): " CLUSTER_NAME
+                check_quit "$CLUSTER_NAME"
+                TARGETS+=("${NAMESPACE}|${CLUSTER_NAME}")
+                ;;
+            *)
+                for entry in "${ALL_CLUSTERS_RAW[@]}"; do
+                    NS=$(awk '{print $1}' <<< "$entry")
+                    NAME=$(awk '{print $2}' <<< "$entry")
+                    TARGETS+=("${NS}|${NAME}")
+                done
+                ;;
+        esac
+    fi
+else
+    # CNP / CNPG: ask whether to sweep every cluster in every namespace, or
+    # collect just one specific cluster.
+    echo "Select collection scope:"
+    echo "  1) All ${VARIANT_LABEL} clusters, across all namespaces"
+    echo "  2) A specific cluster (you provide namespace + cluster name)"
+    echo "  q) Quit"
+    read -rp "Enter choice [1, 2, or q]: " SCOPE_CHOICE
+    check_quit "$SCOPE_CHOICE"
+
+    if [ "$SCOPE_CHOICE" = "1" ]; then
+        if [ ${#ALL_CLUSTERS_RAW[@]} -eq 0 ]; then
+            echo "No clusters auto-detected in any namespace."
+        fi
+        for entry in "${ALL_CLUSTERS_RAW[@]}"; do
+            NS=$(awk '{print $1}' <<< "$entry")
+            NAME=$(awk '{print $2}' <<< "$entry")
+            TARGETS+=("${NS}|${NAME}")
+        done
+    else
+        if [ ${#ALL_CLUSTERS_RAW[@]} -gt 0 ]; then
+            echo "Detected clusters:"
+            for i in "${!ALL_CLUSTERS_RAW[@]}"; do
+                NS=$(awk '{print $1}' <<< "${ALL_CLUSTERS_RAW[$i]}")
+                NAME=$(awk '{print $2}' <<< "${ALL_CLUSTERS_RAW[$i]}")
+                printf "  %2d) %-30s (namespace: %s)\n" "$((i+1))" "$NAME" "$NS"
+            done
+            MANUAL_IDX=$(( ${#ALL_CLUSTERS_RAW[@]} + 1 ))
+            echo "  ${MANUAL_IDX}) Enter manually"
+            echo "  q) Quit"
+            read -rp "Select cluster [1-${MANUAL_IDX}, or q]: " SEL
+            check_quit "$SEL"
+            if [[ "$SEL" =~ ^[0-9]+$ ]] && [ "$SEL" -ge 1 ] && [ "$SEL" -le "${#ALL_CLUSTERS_RAW[@]}" ]; then
+                IDX=$(( SEL - 1 ))
+                NAMESPACE=$(awk '{print $1}' <<< "${ALL_CLUSTERS_RAW[$IDX]}")
+                CLUSTER_NAME=$(awk '{print $2}' <<< "${ALL_CLUSTERS_RAW[$IDX]}")
+            else
+                read -rp "Enter the Namespace of the Cluster (or q to quit): " NAMESPACE
+                check_quit "$NAMESPACE"
+                read -rp "Enter the Cluster Name (or q to quit): " CLUSTER_NAME
+                check_quit "$CLUSTER_NAME"
+            fi
+        else
+            read -rp "Enter the Namespace of the Cluster (or q to quit): " NAMESPACE
+            check_quit "$NAMESPACE"
+            read -rp "Enter the Cluster Name (or q to quit): " CLUSTER_NAME
+            check_quit "$CLUSTER_NAME"
+        fi
+        TARGETS+=("${NAMESPACE}|${CLUSTER_NAME}")
+    fi
+fi
+
+if [ ${#TARGETS[@]} -eq 0 ]; then
+    echo "ERROR: No clusters selected for collection. Exiting."
+    exit 1
+fi
+
+echo ""
+echo "Targets to collect (${#TARGETS[@]}):"
+for t in "${TARGETS[@]}"; do
+    echo "  - namespace=${t%%|*}  cluster=${t##*|}"
+done
+echo ""
+
+# ------------------------------------------------------------
+# 3. DIRECTORY SETUP
+# ------------------------------------------------------------
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+if [ ${#TARGETS[@]} -eq 1 ]; then
+    MAIN_DIR="edb_diag_${TARGETS[0]##*|}_${TIMESTAMP}"
+else
+    MAIN_DIR="edb_diag_${VARIANT_LOWER}_multi_${TIMESTAMP}"
+fi
+
+PODLOGS_DIR="$MAIN_DIR/pods-logs"
+
+mkdir -p "$MAIN_DIR/operator_info/logs" "$MAIN_DIR/storage" "$MAIN_DIR/clusters" "$PODLOGS_DIR"
+[ "$IS_PGD" = true ] && mkdir -p "$MAIN_DIR/pgd_group_info"
+
+for dir in "$MAIN_DIR/operator_info/logs" "$MAIN_DIR/storage" "$MAIN_DIR/clusters" "$PODLOGS_DIR"; do
+    if [ ! -d "$dir" ]; then
+        echo "ERROR: Failed to create directory: $dir - check permissions and disk space."
+        exit 1
+    fi
+done
+
+echo "Starting comprehensive collection into: ${MAIN_DIR}"
+echo "  (all pod logs are also mirrored flat into: ${PODLOGS_DIR})"
+echo ""
+
+# ------------------------------------------------------------
+# 4. OPERATOR DISCOVERY & VERSIONING (cluster-wide, run once)
+# ------------------------------------------------------------
+find_op_pod() {
+    "$KCMD" get pods -A -l "$1" --no-headers 2>/dev/null | head -n 1
+}
+find_op_pod_by_name() {
+    "$KCMD" get pods -A --no-headers 2>/dev/null | grep -i "$1" | head -n 1
+}
+
+echo "Collecting operator-level info..."
+
+OP_POD_INFO=""
+if [ "$IS_PGD" = true ]; then
+    OP_POD_INFO=$(find_op_pod "app.kubernetes.io/name=edb-postgres-distributed-for-kubernetes")
+    [ -z "$OP_POD_INFO" ] && OP_POD_INFO=$(find_op_pod "app.kubernetes.io/name=pgd-operator")
+    [ -z "$OP_POD_INFO" ] && OP_POD_INFO=$(find_op_pod_by_name "pgd-operator")
+else
+    OP_POD_INFO=$(find_op_pod "app.kubernetes.io/name=cloud-native-postgresql")
+    [ -z "$OP_POD_INFO" ] && OP_POD_INFO=$(find_op_pod "app.kubernetes.io/name=cloudnativepg")
+    [ -z "$OP_POD_INFO" ] && OP_POD_INFO=$(find_op_pod_by_name "cnpg-controller-manager")
+fi
+
+if [ -n "$OP_POD_INFO" ]; then
+    OP_NS=$(awk '{print $1}' <<< "$OP_POD_INFO")
+    OP_POD_NAME=$(awk '{print $2}' <<< "$OP_POD_INFO")
+    echo "  Found operator pod: ${OP_POD_NAME} (ns: ${OP_NS})"
+
+    "$KCMD" get pod "$OP_POD_NAME" -n "$OP_NS" \
+        -o jsonpath='{.spec.containers[0].image}' \
+        > "$MAIN_DIR/operator_info/operator_version.txt" 2>/dev/null || true
+
+    "$KCMD" get deployment -n "$OP_NS" -o yaml \
+        > "$MAIN_DIR/operator_info/operator_manifest.yaml" 2>/dev/null || true
+
+    save_all_pod_logs "$OP_NS" "$OP_POD_NAME" "$MAIN_DIR/operator_info/logs"
+else
+    echo "  WARNING: Operator pod not found - skipping operator-level collection."
+fi
+
+# Operator RBAC - RBAC/SCC and OLM-vs-GitOps ClusterRole drift (a GitOps
+# snapshot of an OLM-owned ClusterRole reapplied to another cluster) has
+# been the actual root cause behind reconciliation-failure tickets that
+# initially looked like a pure PGD/BDR problem.
+if [ "$IS_PGD" = true ]; then
+    "$KCMD" describe clusterrole pgd-operator-manager-role \
+        > "$MAIN_DIR/operator_info/operator_clusterrole.txt" 2>/dev/null || true
+else
+    "$KCMD" describe clusterrole postgresql-operator-manager \
+        > "$MAIN_DIR/operator_info/operator_clusterrole.txt" 2>/dev/null || true
+fi
+"$KCMD" get clusterrole --selector=olm.owner.kind=ClusterServiceVersion -o yaml \
+    > "$MAIN_DIR/operator_info/olm_owned_clusterroles.yaml" 2>/dev/null || true
+"$KCMD" get clusterrolebinding -o yaml \
+    > "$MAIN_DIR/operator_info/clusterrolebindings.yaml" 2>/dev/null || true
+
+BARMAN_POD_INFO=$(find_op_pod_by_name "barman-cloud")
+if [ -n "$BARMAN_POD_INFO" ]; then
+    B_NS=$(awk '{print $1}' <<< "$BARMAN_POD_INFO")
+    B_NAME=$(awk '{print $2}' <<< "$BARMAN_POD_INFO")
+    "$KCMD" get pod "$B_NAME" -n "$B_NS" \
+        -o jsonpath='{.spec.containers[0].image}' \
+        > "$MAIN_DIR/operator_info/barman_plugin_version.txt" 2>/dev/null || true
+fi
+
+"$KCMD" get pv > "$MAIN_DIR/storage/all_pv_list.txt" 2>/dev/null || true
+
+# ------------------------------------------------------------
+# 5. PER-CLUSTER / PER-POD / PER-DATABASE COLLECTION
+# ------------------------------------------------------------
+FIRST_PGD_POD_NS=""
+FIRST_PGD_POD_NAME=""
+
+collect_cluster() {
+    local NAMESPACE="$1"
+    local CLUSTER_NAME="$2"
+    local CDIR="$MAIN_DIR/clusters/${NAMESPACE}__${CLUSTER_NAME}"
+    mkdir -p "$CDIR/cluster_info" "$CDIR/pods"
+
+    echo "=== Collecting cluster: ${NAMESPACE}/${CLUSTER_NAME} ==="
+
+    # ---- Cluster-level diagnostics ----
+    if [ "$YQ_AVAILABLE" = true ]; then
+        "$KCMD" get cluster "$CLUSTER_NAME" -n "$NAMESPACE" -o yaml 2>/dev/null | \
+            yq 'del(.status,
+                    .metadata.uid,
+                    .metadata.selfLink,
+                    .metadata.resourceVersion,
+                    .metadata.creationTimestamp,
+                    .metadata.generation,
+                    .metadata.managedFields)' \
+            > "$CDIR/cluster_info/cluster_definition_clean.yaml" 2>/dev/null || true
+    fi
+
+    "$KCMD" get cluster "$CLUSTER_NAME" -n "$NAMESPACE" -o yaml \
+        > "$CDIR/cluster_info/cluster_definition_full.yaml" 2>/dev/null || true
+
+    "$KCMD" "$OP_CMD" status "$CLUSTER_NAME" -n "$NAMESPACE" \
+        > "$CDIR/cluster_info/cluster_status.txt" 2>/dev/null || true
+
+    "$KCMD" describe cluster "$CLUSTER_NAME" -n "$NAMESPACE" \
+        > "$CDIR/cluster_info/cluster_describe.txt" 2>/dev/null || true
+
+    "$KCMD" get backup -n "$NAMESPACE" -o yaml \
+        > "$CDIR/cluster_info/backups.yaml" 2>/dev/null || true
+    "$KCMD" "$OP_CMD" get backups "$CLUSTER_NAME" -n "$NAMESPACE" \
+        > "$CDIR/cluster_info/backups_summary.txt" 2>/dev/null || true
+
+    # ScheduledBackups and their controller Jobs - a stuck ScheduledBackup
+    # (reconciliation loop, "already exists" errors on the target Backup
+    # name) or a hung backup Job has been the root cause in real PGD4K cases.
+    "$KCMD" get scheduledbackup -n "$NAMESPACE" -o yaml \
+        > "$CDIR/cluster_info/scheduledbackups.yaml" 2>/dev/null || true
+    "$KCMD" get jobs -n "$NAMESPACE" -o wide \
+        > "$CDIR/cluster_info/jobs.txt" 2>/dev/null || true
+
+    # PGDGroupCleanup objects - completed/stuck cleanups are frequently
+    # mistaken for (or actually are) the trigger behind a later outage.
+    "$KCMD" get pgdgroupcleanups -n "$NAMESPACE" -o yaml \
+        > "$CDIR/cluster_info/pgdgroupcleanups.yaml" 2>/dev/null || true
+
+    "$KCMD" get events -n "$NAMESPACE" --sort-by='.lastTimestamp' \
+        > "$CDIR/cluster_info/namespace_events.txt" 2>/dev/null || true
+
+    "$KCMD" get pvc -n "$NAMESPACE" \
+        > "$CDIR/cluster_info/pvc_list.txt" 2>/dev/null || true
+
+    # Secret *names/types* only (never contents) - to catch missing
+    # image-pull secrets (FailedToRetrieveImagePullSecret) without touching
+    # credential data.
+    "$KCMD" get secrets -n "$NAMESPACE" \
+        > "$CDIR/cluster_info/secrets_list.txt" 2>/dev/null || true
+
+    # Namespace definition - carries OpenShift SCC/UID-range annotations
+    # (openshift.io/sa.scc.uid-range, supplemental-groups) that matter when
+    # diagnosing "chmod ... operation not permitted" PGDATA ownership issues.
+    "$KCMD" get namespace "$NAMESPACE" -o yaml \
+        > "$CDIR/cluster_info/namespace_definition.yaml" 2>/dev/null || true
+
+    # ---- Pod discovery ----
+    local PODS
+    PODS=$("$KCMD" get pods -n "$NAMESPACE" -l "cnpg.io/cluster=$CLUSTER_NAME" \
+        -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
+
+    if [ -z "$PODS" ]; then
+        PODS=$("$KCMD" get pods -n "$NAMESPACE" --no-headers \
+            -o custom-columns=":metadata.name" 2>/dev/null | grep "^${CLUSTER_NAME}-" | tr '\n' ' ')
+    fi
+
+    if [ -z "$PODS" ]; then
+        echo "  WARNING: No pods found for cluster '${CLUSTER_NAME}' in namespace '${NAMESPACE}'."
+        return
+    fi
+
+    for POD in $PODS; do
+        echo "  --- Processing Pod: $POD ---"
+        local POD_DIR="$CDIR/pods/$POD"
+        mkdir -p "$POD_DIR/postgresql"
+
+        "$KCMD" describe pod "$POD" -n "$NAMESPACE" \
+            > "$POD_DIR/describe_result.txt" 2>/dev/null || true
+
+        # OpenShift SCC + assigned UID (empty/no-op on vanilla Kubernetes) -
+        # needed to confirm a pod's assigned UID against the PV's on-disk
+        # PGDATA ownership when diagnosing "chmod: operation not permitted".
+        "$KCMD" get pod "$POD" -n "$NAMESPACE" \
+            -o jsonpath='{.metadata.annotations.openshift\.io/scc}{"\n"}{.spec.securityContext}{"\n"}' \
+            > "$POD_DIR/scc_and_security_context.txt" 2>/dev/null || true
+
+        # Logs for every container/init container on the pod - not just
+        # "postgres" - so PGD4K sidecars aren't silently skipped. Saved both
+        # nested here AND flat into $PODLOGS_DIR.
+        save_all_pod_logs "$NAMESPACE" "$POD" "$POD_DIR/postgresql"
+
+        run_pod_sql() {
+            "$KCMD" exec -n "$NAMESPACE" "$POD" -c postgres -- \
+                psql -U postgres -c "$1" > "$POD_DIR/postgresql/$2" 2>/dev/null || true
+        }
+
+        run_pod_sql "SELECT version();"                  "db_version.out"
+        run_pod_sql "SHOW ALL;"                           "show_all.out"
+        run_pod_sql "SELECT * FROM pg_stat_replication;"  "replication.out"
+        run_pod_sql "SELECT * FROM pg_stat_bgwriter;"     "bgwriter.out"
+        run_pod_sql "SELECT * FROM pg_stat_archiver;"     "archiver.out"
+        run_pod_sql "SELECT * FROM pg_stat_subscription;" "pg_stat_subscription.out"
+
+        # Slot detail + the WAL each one is anchoring. inactive_since resets
+        # easily and is not reliable on its own for how long a slot has been
+        # stuck - restart_lsn lag (cross-checked against bdr.group_replslots_details
+        # below on PGD) is the number to trust.
+        run_pod_sql "SELECT slot_name, slot_type, plugin, database, active, \
+inactive_since, restart_lsn, confirmed_flush_lsn, \
+pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS retained_wal \
+FROM pg_replication_slots;" "replication_slots.out"
+
+        # Role OIDs - on a multi-master BDR/PGD group, the same role name
+        # existing with a DIFFERENT oid on each node means it was created
+        # locally on each node instead of replicated via one DDL statement.
+        # That mismatch is exactly what causes "role already exists" /
+        # "writer with pid ... has died" replay loops after a reconnect.
+        run_pod_sql "SELECT rolname, oid FROM pg_roles ORDER BY rolname;" "pg_roles.out"
+
+        QUERY_ACT="SELECT COALESCE(state,'internal/background') AS state, count(*) \
+FROM pg_stat_activity GROUP BY 1 \
+UNION ALL SELECT 'Total', count(*) FROM pg_stat_activity \
+ORDER BY (state='Total') ASC, count DESC;"
+        run_pod_sql "$QUERY_ACT" "activity_counts.out"
+
+        # ---- PGD4K / BDR per-node diagnostics ----
+        # Schema names/views below follow EDB Postgres Distributed's `bdr.*`
+        # monitoring catalog. Adjust the schema name here if a future PGD
+        # version renames it (e.g. to `spock.*`).
+        if [ "$IS_PGD" = true ]; then
+            if [ -z "$FIRST_PGD_POD_NAME" ]; then
+                FIRST_PGD_POD_NS="$NAMESPACE"
+                FIRST_PGD_POD_NAME="$POD"
+            fi
+
+            run_pod_sql "SELECT * FROM bdr.node_summary;"            "bdr_node_summary.out"
+            run_pod_sql "SELECT * FROM bdr.node_slots;"              "bdr_node_slots.out"
+            run_pod_sql "SELECT * FROM bdr.worker_errors ORDER BY error_time DESC;" \
+                                                                      "bdr_worker_errors.out"
+            run_pod_sql "SELECT * FROM bdr.subscription_summary;"    "bdr_subscription_summary.out"
+            run_pod_sql "SELECT * FROM bdr.group_versions_details;"  "bdr_group_versions_details.out"
+            run_pod_sql "SELECT * FROM bdr.group_raft_details;"      "bdr_group_raft_details.out"
+            run_pod_sql "SELECT * FROM bdr.group_replslots_details;" "bdr_group_replslots_details.out"
+            run_pod_sql "SELECT * FROM bdr.event_history WHERE event_type = 'write_leader' \
+ORDER BY event_time DESC LIMIT 200;"                                 "bdr_write_leader_history.out"
+
+            # bdr.subscription (per-subscription status, e.g. "down") is the
+            # real signal on witness nodes - pg_stat_subscription is always
+            # empty there since PGD doesn't use native logical subscriptions.
+            run_pod_sql "SELECT * FROM bdr.subscription;"            "bdr_subscription.out"
+
+            # Has shown *different* rows depending on which node you query -
+            # capture it per-pod, not just once for the group, so that
+            # inconsistency is visible rather than hidden behind one sample.
+            run_pod_sql "SELECT * FROM bdr.proxy_config_summary ORDER BY proxy_name;" \
+                                                                       "bdr_proxy_config_summary.out"
+
+            # Native CLI, per-node view (complements the one-shot group CLI
+            # calls in section 6 below).
+            "$KCMD" exec -n "$NAMESPACE" "$POD" -c postgres -- \
+                pgd replication show --slots > "$POD_DIR/postgresql/pgd_replication_slots.out" 2>/dev/null || true
+        fi
+
+        # Per-database deep dive
+        local DB_LIST
+        DB_LIST=$("$KCMD" exec -n "$NAMESPACE" "$POD" -c postgres -- \
+            psql -U postgres -t -c \
+            "SELECT datname FROM pg_database WHERE datallowconn AND datname NOT LIKE 'template%';" \
+            2>/dev/null | xargs)
+
+        for DB in $DB_LIST; do
+            echo "     -> Collecting from Database: $DB"
+            local DB_SUBDIR="$POD_DIR/postgresql/db_${DB}"
+            mkdir -p "$DB_SUBDIR"
+
+            run_db_sql() {
+                "$KCMD" exec -n "$NAMESPACE" "$POD" -c postgres -- \
+                    psql -U postgres -d "$DB" -c "$1" > "$DB_SUBDIR/$2" 2>/dev/null || true
+            }
+
+            run_db_sql "SELECT * FROM pg_available_extensions WHERE installed_version IS NOT NULL;" \
+                "extensions.out"
+            run_db_sql "SELECT * FROM pg_stat_user_tables;" "pg_stat_user_tables.out"
+            run_db_sql "SELECT relname, n_live_tup, n_dead_tup FROM pg_stat_user_tables ORDER BY 3 DESC;" \
+                "table_tuples.out"
+            run_db_sql "SELECT schemaname, relname, \
+pg_size_pretty(pg_relation_size(relid)) AS actual_size, \
+n_dead_tup, last_autovacuum \
+FROM pg_stat_all_tables ORDER BY n_dead_tup DESC;" "database_bloat.out"
+            run_db_sql "SELECT schemaname, relname, indexrelname, \
+pg_size_pretty(pg_relation_size(indexrelid)) AS index_size, idx_scan \
+FROM pg_stat_user_indexes ORDER BY pg_relation_size(indexrelid) DESC;" "index_bloat.out"
+            run_db_sql "SELECT * FROM pg_locks;" "pg_locks.out"
+            run_db_sql "SELECT * FROM pg_stat_activity;" "pg_stat_activity.out"
+
+            BLOCK_Q1="SELECT \
+  blocked_locks.pid               AS blocked_pid, \
+  blocked_activity.usename        AS blocked_user, \
+  now() - blocked_activity.query_start AS blocked_duration, \
+  blocking_locks.pid              AS blocking_pid, \
+  blocking_activity.usename       AS blocking_user, \
+  now() - blocking_activity.query_start AS blocking_duration, \
+  blocked_activity.query          AS blocked_statement, \
+  blocking_activity.query         AS blocking_statement \
+FROM pg_catalog.pg_locks AS blocked_locks \
+JOIN pg_catalog.pg_stat_activity AS blocked_activity  ON blocked_activity.pid  = blocked_locks.pid \
+JOIN pg_catalog.pg_locks AS blocking_locks \
+  ON blocking_locks.locktype = blocked_locks.locktype \
+ AND blocking_locks.DATABASE          IS NOT DISTINCT FROM blocked_locks.DATABASE \
+ AND blocking_locks.relation          IS NOT DISTINCT FROM blocked_locks.relation \
+ AND blocking_locks.page              IS NOT DISTINCT FROM blocked_locks.page \
+ AND blocking_locks.tuple             IS NOT DISTINCT FROM blocked_locks.tuple \
+ AND blocking_locks.virtualxid        IS NOT DISTINCT FROM blocked_locks.virtualxid \
+ AND blocking_locks.transactionid     IS NOT DISTINCT FROM blocked_locks.transactionid \
+ AND blocking_locks.classid           IS NOT DISTINCT FROM blocked_locks.classid \
+ AND blocking_locks.objid             IS NOT DISTINCT FROM blocked_locks.objid \
+ AND blocking_locks.objsubid          IS NOT DISTINCT FROM blocked_locks.objsubid \
+ AND blocking_locks.pid != blocked_locks.pid \
+JOIN pg_catalog.pg_stat_activity AS blocking_activity ON blocking_activity.pid = blocking_locks.pid \
+WHERE NOT blocked_locks.granted;"
+            run_db_sql "$BLOCK_Q1" "blocking_analysis_detailed.out"
+
+            BLOCK_Q2="SELECT activity.pid, activity.usename, activity.query, \
+  blocking.pid AS blocking_id, blocking.query AS blocking_query \
+FROM pg_stat_activity AS activity \
+JOIN pg_stat_activity AS blocking ON blocking.pid = ANY(pg_blocking_pids(activity.pid));"
+            run_db_sql "$BLOCK_Q2" "blocking_summary.out"
+        done
+    done
+}
+
+for T in "${TARGETS[@]}"; do
+    collect_cluster "${T%%|*}" "${T##*|}"
+done
+
+# ------------------------------------------------------------
+# 6. PGD/BDR GROUP-WIDE DIAGNOSTICS (once, via one representative node)
+# ------------------------------------------------------------
+if [ "$IS_PGD" = true ] && [ -n "$FIRST_PGD_POD_NAME" ]; then
+    echo ""
+    echo "=== Collecting PGD/BDR group-wide diagnostics (via ${FIRST_PGD_POD_NAME}) ==="
+    GDIR="$MAIN_DIR/pgd_group_info"
+
+    # Native `pgd` CLI - opportunistic. It ships inside the postgresql-pgd
+    # image on most PGD4K builds, but needs a resolvable DSN/local auth to
+    # run non-interactively. If these files come back empty, re-run manually
+    # with an explicit --dsn against one of the pods.
+    for SUBCMD in check-health show-groups show-nodes show-raft; do
+        OUTFILE="pgd_$(echo "$SUBCMD" | tr '-' '_').out"
+        "$KCMD" exec -n "$FIRST_PGD_POD_NS" "$FIRST_PGD_POD_NAME" -c postgres -- \
+            pgd "$SUBCMD" > "$GDIR/$OUTFILE" 2>/dev/null || true
+    done
+
+    "$KCMD" get pgdgroups -A -o yaml > "$GDIR/pgdgroups.yaml" 2>/dev/null || true
+    "$KCMD" get pgdgroupcleanups -A -o yaml > "$GDIR/pgdgroupcleanups.yaml" 2>/dev/null || true
+
+    # PGD Proxy is a separate component/Deployment from the data-node pods
+    # collected in section 5 above - it needs its own describe+logs, not
+    # just the connection routing visible from bdr.proxy_config_summary.
+    echo "  Collecting PGD Proxy pod diagnostics..."
+    mkdir -p "$GDIR/proxy_pods"
+    PROXY_PODS_RAW=$("$KCMD" get pods -A --no-headers 2>/dev/null | grep -i -- '-proxy-' )
+    if [ -n "$PROXY_PODS_RAW" ]; then
+        while IFS= read -r line; do
+            [ -z "${line// /}" ] && continue
+            P_NS=$(awk '{print $1}' <<< "$line")
+            P_NAME=$(awk '{print $2}' <<< "$line")
+            PDIR="$GDIR/proxy_pods/${P_NS}__${P_NAME}"
+            mkdir -p "$PDIR"
+            "$KCMD" describe pod "$P_NAME" -n "$P_NS" > "$PDIR/describe_result.txt" 2>/dev/null || true
+            save_all_pod_logs "$P_NS" "$P_NAME" "$PDIR"
+        done <<< "$PROXY_PODS_RAW"
+    else
+        echo "  WARNING: No PGD Proxy pods found (label/name pattern '-proxy-')."
+    fi
+fi
+
+# ------------------------------------------------------------
+# 7. PACKAGING
+# ------------------------------------------------------------
+echo "--------------------------------------------------------"
+tar -czf "${MAIN_DIR}.tar.gz" "$MAIN_DIR"
+rm -rf "$MAIN_DIR"
+echo "Collection complete: ${MAIN_DIR}.tar.gz"
