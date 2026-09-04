@@ -2,6 +2,8 @@
 
 A specialized `kubectl` plugin designed to collect deep diagnostic information from EDB Postgres for Kubernetes (CNP), CloudNativePG (CNPG), and EDB Postgres Distributed for Kubernetes (PGD4K) clusters.
 
+> **Read-only and safe to run:** this tool never modifies your cluster and never collects credentials or secret values - only secret names/types, never contents. See "What is collected?" below for the full list.
+
 ## 🐧 Mac OS and Linux Installation
 
 Install the plugin globally using the following command:
@@ -11,6 +13,14 @@ curl -sSfL https://github.com/EnterpriseDB/kubectl-cnp-diagnostic/raw/main/insta
 ```
 
 > **Note**: This script downloads the `kubectl-edbdiag` binary, installs it to `~/.local/bin`, and adds that path to your shell's PATH if it isn't already there — so both `kubectl edbdiag` and a bare `kubectl-edbdiag` work afterwards.
+
+**If the command above hangs or times out:** some corporate networks (Netskope, Zscaler, and similar SSL-inspecting proxies) silently block GitHub's raw-content URLs. Use this instead:
+
+```
+git clone https://github.com/EnterpriseDB/kubectl-cnp-diagnostic.git
+cd kubectl-cnp-diagnostic
+bash install.sh
+```
 
 ## 🪟 Windows Installation
 
@@ -52,6 +62,8 @@ The tool generates a comprehensive `.tar.gz` package including:
     * **Maintenance**: Extension lists, database versions, and `SHOW ALL` parameters.
     * **Replication**: Slot detail with retained-WAL size, `pg_stat_subscription`, and role OIDs (`pg_roles`) — useful for spotting a role created independently on each node instead of via replicated DDL.
 * **PGD4K-specific**: per-node BDR/PGD catalog views (`bdr.node_summary`, `bdr.node_slots`, `bdr.worker_errors`, `bdr.subscription_summary`, `bdr.subscription`, `bdr.group_versions_details`, `bdr.group_raft_details`, `bdr.group_replslots_details`, `bdr.proxy_config_summary`, `write_leader` history), the native `pgd` CLI (`check-health`, `show-groups`, `show-nodes`, `show-raft`, `replication show --slots`), PGDGroup/PGDGroupCleanup manifests, and dedicated `describe`+logs for PGD Proxy pods.
+
+> **Note on data handling:** `postgres.log` is collected in full. If your cluster has verbose SQL logging enabled (e.g. `log_statement = all`), that log could contain literal query values. Review the generated `.tar.gz` before sharing it if your organization has strict data-handling requirements.
 ---
 
 ## 📋 Usage Example
