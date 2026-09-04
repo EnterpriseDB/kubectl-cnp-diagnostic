@@ -73,11 +73,22 @@ mv "$TMP_DIR/$BINARY" "$INSTALL_PATH/"
 #    (plugin form) and a bare `kubectl-edbdiag` (direct form) work without
 #    typing the full path.
 
+# NEEDS_RESTART tracks whether *this* shell's PATH is missing the install
+# directory. A script run via `curl | sh` executes in a throwaway subshell -
+# nothing it does to PATH, or to a *ancestor* shell's environment, and it
+# can carry back into the interactive shell that invoked it. That is a hard
+# limitation of how Unix processes work, not something any installer (this
+# one, homebrew, rustup, nvm, etc.) can bypass. The best we can do is make
+# sure the one-time "open a new terminal" step is impossible to miss.
+NEEDS_RESTART=false
+SHELL_RC=""
+
 case ":${PATH}:" in
     *":${INSTALL_PATH}:"*)
         # Already on PATH for this session - nothing to do.
         ;;
     *)
+        NEEDS_RESTART=true
         USER_SHELL_NAME=$(basename "${SHELL:-/bin/bash}")
         case "$USER_SHELL_NAME" in
             zsh)  SHELL_RC="${TARGET_HOME}/.zshrc" ;;
@@ -92,13 +103,29 @@ case ":${PATH}:" in
         esac
 
         if [ -f "$SHELL_RC" ] && grep -qs "$INSTALL_PATH" "$SHELL_RC" 2>/dev/null; then
-            : # already configured previously
+            : # already configured previously - still needs a restart, see below
         else
             echo "export PATH=\"${INSTALL_PATH}:\$PATH\"" >> "$SHELL_RC"
-            echo "Added ${INSTALL_PATH} to PATH in ${SHELL_RC}."
-            echo "Restart your terminal or run: source ${SHELL_RC}"
         fi
         ;;
 esac
 
-echo "Installation successful! Run it using: kubectl edbdiag  (or just: kubectl-edbdiag)"
+echo "Installation successful!"
+
+# Put the PATH warning LAST and make it loud - it's easy to scroll past a
+# one-line note buried above other output, and every tester who has hit
+# "command not found" right after installing simply kept typing in the same
+# terminal instead of restarting it. This is the final thing printed so it's
+# the thing people actually read.
+if [ "$NEEDS_RESTART" = true ]; then
+    echo ""
+    echo "############################################################"
+    echo "#  ACTION NEEDED before 'kubectl edbdiag' will work:        "
+    echo "#  This terminal window can't see the updated PATH yet.     "
+    echo "#  Open a NEW terminal window/tab, OR run:                  "
+    echo "#      source ${SHELL_RC}"
+    echo "############################################################"
+    echo ""
+else
+    echo "Run it using: kubectl edbdiag  (or just: kubectl-edbdiag)"
+fi
