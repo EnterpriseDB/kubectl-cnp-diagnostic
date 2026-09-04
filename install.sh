@@ -30,10 +30,32 @@ fi
 
 TARGET_USER="$(whoami)"
 TARGET_HOME=$(eval echo "~${TARGET_USER}")
-INSTALL_PATH="${TARGET_HOME}/.local/bin"
-mkdir -p "$INSTALL_PATH"
 
 echo "Installing $BINARY from $OWNER/$REPO..."
+
+# Prefer a directory that's already on PATH and already writable without
+# sudo - on almost every real-world Mac dev machine that means Homebrew's
+# bin dir (owned by the user on Apple Silicon, and commonly user-writable
+# on Intel too). If we can use one of these, the command works immediately
+# with no PATH edit and no "restart your terminal" step at all. Only fall
+# back to ~/.local/bin (which does need a PATH edit, see below) if none of
+# these candidates are both present on PATH and writable.
+INSTALL_PATH=""
+for CANDIDATE in /opt/homebrew/bin /usr/local/bin; do
+    case ":${PATH}:" in
+        *":${CANDIDATE}:"*)
+            if [ -d "$CANDIDATE" ] && [ -w "$CANDIDATE" ]; then
+                INSTALL_PATH="$CANDIDATE"
+                break
+            fi
+            ;;
+    esac
+done
+
+if [ -z "$INSTALL_PATH" ]; then
+    INSTALL_PATH="${TARGET_HOME}/.local/bin"
+    mkdir -p "$INSTALL_PATH"
+fi
 
 # 1. Fetch the tool via `git clone` rather than curl-ing
 #    raw.githubusercontent.com directly. Some corporate SSL-inspecting
