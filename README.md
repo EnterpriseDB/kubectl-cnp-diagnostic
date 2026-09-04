@@ -49,8 +49,8 @@ The tool auto-detects whether you're on plain Kubernetes or OpenShift (`oc`) and
 The tool generates a comprehensive `.tar.gz` package including:
 * **Operator Variant**: CNP, CNPG, or PGD4K selected first, before any cluster/namespace input.
 * **Collection Scope**:
-    * CNP/CNPG — collect every cluster across every namespace, or a single named cluster.
-    * PGD4K — since a PGD group is made up of multiple per-node `Cluster` resources (often across namespaces), the tool auto-discovers all of them and lets you collect the whole group, one namespace, or a single node.
+    * CNP/CNPG: collect every cluster across every namespace, or a single named cluster.
+    * PGD4K: since a PGD group is made up of multiple per-node `Cluster` resources (often across namespaces), the tool auto-discovers all of them and lets you collect the whole group, one namespace, or a single node.
 * **Cluster Level**: Status, full/cleaned YAML manifests, `describe` output, namespace events, ScheduledBackups, Jobs, PGDGroupCleanups, PVCs, Secrets (names/types only — never contents), and the Namespace definition (captures OpenShift SCC/UID-range annotations).
 * **Operator Level**: Version tags, deployment manifests, controller logs, and RBAC (operator ClusterRole, OLM-owned ClusterRoles, ClusterRoleBindings).
 * **Pod Level**: `describe` output, OpenShift SCC/security-context annotation, and logs for **every container and init container** on the pod (not just `postgres`).
