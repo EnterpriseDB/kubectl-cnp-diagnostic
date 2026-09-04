@@ -226,7 +226,7 @@ The tool organizes results by cluster, pod, and database for easy troubleshootin
 │           │   └── scc_and_security_context.txt
 │           ├── postgresql-advanced-cluster-2
 │           │
-│           └── postgresql-advanced-cluster-4
+│           └── postgresql-advanced-cluster-3
 │
 ├── operator_info
 │   ├── barman_plugin_version.txt
