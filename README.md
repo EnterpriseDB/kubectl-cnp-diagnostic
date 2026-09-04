@@ -2,7 +2,7 @@
 
 A specialized `kubectl` plugin designed to collect deep diagnostic information from EDB Postgres for Kubernetes (CNP), CloudNativePG (CNPG), and EDB Postgres Distributed for Kubernetes (PGD4K) clusters.
 
-> **Read-only and safe to run:** This tool never modifies your cluster and never collects credentials or secret values - only secret names/types, never contents. See "What is collected?" below for the full list.
+> **Read-only and safe to run:** This tool never modifies your cluster and never collects credentials or secret values. Only secret names/types, never contents. See "What is collected?" below for the full list.
 
 ## 🐧 Mac OS and Linux Installation
 
