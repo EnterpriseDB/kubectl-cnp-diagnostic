@@ -107,7 +107,7 @@ Collecting operator-level info...
      -> Collecting from Database: edb
      -> Collecting from Database: app
   --- Processing Pod: postgresql-advanced-cluster-2 ---
-  --- Processing Pod: postgresql-advanced-cluster-4 ---
+  --- Processing Pod: postgresql-advanced-cluster-3 ---
 --------------------------------------------------------
 Collection complete: edb_diag_postgresql-advanced-cluster_20260810_205527.tar.gz
 ```
@@ -251,12 +251,12 @@ The tool organizes results by cluster, pod, and database for easy troubleshootin
 │   ├── default__postgresql-advanced-cluster-2__plugin-barman-cloud.log
 │   ├── default__postgresql-advanced-cluster-2__postgres_previous.log
 │   ├── default__postgresql-advanced-cluster-2__postgres.log
-│   ├── default__postgresql-advanced-cluster-4__bootstrap-controller_previous.log
-│   ├── default__postgresql-advanced-cluster-4__bootstrap-controller.log
-│   ├── default__postgresql-advanced-cluster-4__plugin-barman-cloud_previous.log
-│   ├── default__postgresql-advanced-cluster-4__plugin-barman-cloud.log
-│   ├── default__postgresql-advanced-cluster-4__postgres_previous.log
-│   ├── default__postgresql-advanced-cluster-4__postgres.log
+│   ├── default__postgresql-advanced-cluster-3__bootstrap-controller_previous.log
+│   ├── default__postgresql-advanced-cluster-3__bootstrap-controller.log
+│   ├── default__postgresql-advanced-cluster-3__plugin-barman-cloud_previous.log
+│   ├── default__postgresql-advanced-cluster-3__plugin-barman-cloud.log
+│   ├── default__postgresql-advanced-cluster-3__postgres_previous.log
+│   ├── default__postgresql-advanced-cluster-3__postgres.log
 │   ├── postgresql-operator-system__postgresql-operator-controller-manager-754f87c5b-bqv9n__manager_previous.log
 │   └── postgresql-operator-system__postgresql-operator-controller-manager-754f87c5b-bqv9n__manager.log
 └── storage
