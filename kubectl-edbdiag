@@ -299,8 +299,8 @@ echo ""
 # ------------------------------------------------------------
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 if [ ${#TARGETS[@]} -eq 1 ]; then
-    MAIN_DIR="edb_diag_${ TARGETS[0]##*|}_${TIMESTAMP}"
-lese
+    MAIN_DIR="edb_diag_${TARGETS[0]##*|}_${TIMESTAMP}"
+else
     MAIN_DIR="edb_diag_${VARIANT_LOWER}_multi_${TIMESTAMP}"
 fi
 
@@ -397,7 +397,7 @@ FIRST_PGD_POD_DB=""
 collect_cluster() {
     local NAMESPACE="$1"
     local CLUSTER_NAME="$2"
-    local CDIR="$MAIN_DIR/clusters/${ NAMESPACE}__${ CLUSTER_NAME}"
+        local CDIR="$MAIN_DIR/clusters/${NAMESPACE}__${CLUSTER_NAME}"
     mkdir -p "$CDIR/cluster_info" "$CDIR/pods"
 
     echo "=== Collecting cluster: ${NAMESPACE}/${CLUSTER_NAME} ==="
