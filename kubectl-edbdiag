@@ -52,6 +52,18 @@ else
     exit 1
 fi
 
+# Fail loudly on an unreachable cluster instead of letting every later
+# kubectl/oc call silently swallow the error. Otherwise a stale, expired,
+# or missing kubeconfig context doesn't stop the script - it just makes
+# every downstream command fail silently, and the script still "succeeds",
+# producing a full-looking but entirely empty diagnostic bundle.
+if ! "$KCMD" cluster-info &>/dev/null; then
+    echo "ERROR: Cannot reach a Kubernetes API server with the current context." >&2
+    echo "       Check kubectl config current-context and kubectl cluster-info," >&2
+    echo "       fix your kubeconfig, then re-run." >&2
+    exit 1
+fi
+
 YQ_AVAILABLE=false
 if command -v yq &>/dev/null; then
     YQ_AVAILABLE=true
