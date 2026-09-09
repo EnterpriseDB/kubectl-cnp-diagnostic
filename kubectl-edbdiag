@@ -52,15 +52,17 @@ else
     exit 1
 fi
 
-# Fail loudly on an unreachable cluster instead of letting every later
-# kubectl/oc call silently swallow the error. Otherwise a stale, expired,
-# or missing kubeconfig context doesn't stop the script - it just makes
-# every downstream command fail silently, and the script still "succeeds",
-# producing a full-looking but entirely empty diagnostic bundle.
+# Fail loudly here rather than letting every downstream `kubectl`/`oc` call
+# silently swallow the error (they're all `2>/dev/null || true` on purpose,
+# so one missing resource type doesn't abort the whole run). Without this
+# check, a stale/expired/wrong kubeconfig context - or no context at all -
+# doesn't stop the script; it just makes every subsequent command fail
+# silently, and the script still "succeeds", producing a full-looking but
+# entirely empty diagnostic bundle instead of a clear error up front.
 if ! "$KCMD" cluster-info &>/dev/null; then
     echo "ERROR: Cannot reach a Kubernetes API server with the current context." >&2
-    echo "       Check kubectl config current-context and kubectl cluster-info," >&2
-    echo "       fix your kubeconfig, then re-run." >&2
+    echo "       Check 'kubectl config current-context' and 'kubectl cluster-info',"  >&2
+    echo "       fix/point your kubeconfig at the right cluster, then re-run." >&2
     exit 1
 fi
 
@@ -297,8 +299,8 @@ echo ""
 # ------------------------------------------------------------
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 if [ ${#TARGETS[@]} -eq 1 ]; then
-    MAIN_DIR="edb_diag_${TARGETS[0]##*|}_${TIMESTAMP}"
-else
+    MAIN_DIR="edb_diag_${ TARGETS[0]##*|}_${TIMESTAMP}"
+lese
     MAIN_DIR="edb_diag_${VARIANT_LOWER}_multi_${TIMESTAMP}"
 fi
 
@@ -390,11 +392,12 @@ fi
 # ------------------------------------------------------------
 FIRST_PGD_POD_NS=""
 FIRST_PGD_POD_NAME=""
+FIRST_PGD_POD_DB=""
 
 collect_cluster() {
     local NAMESPACE="$1"
     local CLUSTER_NAME="$2"
-    local CDIR="$MAIN_DIR/clusters/${NAMESPACE}__${CLUSTER_NAME}"
+    local CDIR="$MAIN_DIR/clusters/${ NAMESPACE}__${ CLUSTER_NAME}"
     mkdir -p "$CDIR/cluster_info" "$CDIR/pods"
 
     echo "=== Collecting cluster: ${NAMESPACE}/${CLUSTER_NAME} ==="
@@ -497,6 +500,15 @@ collect_cluster() {
                 psql -U postgres -c "$1" > "$POD_DIR/postgresql/$2" 2>/dev/null || true
         }
 
+        # Discovered here (rather than after the PGD block below) because
+        # PGD_DB discovery, right below, needs this list to find which
+        # database actually has the bdr extension.
+        local DB_LIST
+        DB_LIST=$("$KCMD" exec -n "$NAMESPACE" "$POD" -c postgres -- \
+            psql -U postgres -t -c \
+            "SELECT datname FROM pg_database WHERE datallowconn AND datname NOT LIKE 'template%';" \
+            2>/dev/null | xargs)
+
         run_pod_sql "SELECT version();"                  "db_version.out"
         run_pod_sql "SHOW ALL;"                           "show_all.out"
         run_pod_sql "SELECT * FROM pg_stat_replication;"  "replication.out"
@@ -531,45 +543,65 @@ ORDER BY (state='Total') ASC, count DESC;"
         # monitoring catalog. Adjust the schema name here if a future PGD
         # version renames it (e.g. to `spock.*`).
         if [ "$IS_PGD" = true ]; then
+            # BDR/PGD is enabled per-database, and it is NOT guaranteed to be
+            # the default "postgres" maintenance database that run_pod_sql
+            # above connects to - querying bdr.* there just silently returns
+            # nothing ("schema bdr does not exist", swallowed by 2>/dev/null).
+            # Find the real BDR-enabled database by checking each one from
+            # DB_LIST above; fall back to "app" (the CNP/PGD4K bootstrap
+            # default) if none of them report the extension.
+            PGD_DB=""
+            for CANDIDATE_DB in $DB_LIST; do
+                HAS_BDR=$("$KCMD" exec -n "$NAMESPACE" "$POD" -c postgres -- \
+                    psql -U postgres -d "$CANDIDATE_DB" -tA -c \
+                    "SELECT 1 FROM pg_extension WHERE extname = 'bdr';" 2>/dev/null)
+                if [ "$HAS_BDR" = "1" ]; then
+                    PGD_DB="$CANDIDATE_DB"
+                    break
+                fi
+            done
+            [ -z "$PGD_DB" ] && PGD_DB="app"
+
+            run_pod_sql_pgd() {
+                "$KCMD" exec -n "$NAMESPACE" "$POD" -c postgres -- \
+                    psql -U postgres -d "$PGD_DB" -c "$1" > "$POD_DIR/postgresql/$2" 2>/dev/null || true
+            }
+
             if [ -z "$FIRST_PGD_POD_NAME" ]; then
                 FIRST_PGD_POD_NS="$NAMESPACE"
                 FIRST_PGD_POD_NAME="$POD"
+                FIRST_PGD_POD_DB="$PGD_DB"
             fi
 
-            run_pod_sql "SELECT * FROM bdr.node_summary;"            "bdr_node_summary.out"
-            run_pod_sql "SELECT * FROM bdr.node_slots;"              "bdr_node_slots.out"
-            run_pod_sql "SELECT * FROM bdr.worker_errors ORDER BY error_time DESC;" \
+            run_pod_sql_pgd "SELECT * FROM bdr.node_summary;"            "bdr_node_summary.out"
+            run_pod_sql_pgd "SELECT * FROM bdr.node_slots;"              "bdr_node_slots.out"
+            run_pod_sql_pgd "SELECT * FROM bdr.worker_errors ORDER BY error_time DESC;" \
                                                                       "bdr_worker_errors.out"
-            run_pod_sql "SELECT * FROM bdr.subscription_summary;"    "bdr_subscription_summary.out"
-            run_pod_sql "SELECT * FROM bdr.group_versions_details;"  "bdr_group_versions_details.out"
-            run_pod_sql "SELECT * FROM bdr.group_raft_details;"      "bdr_group_raft_details.out"
-            run_pod_sql "SELECT * FROM bdr.group_replslots_details;" "bdr_group_replslots_details.out"
-            run_pod_sql "SELECT * FROM bdr.event_history WHERE event_type = 'write_leader' \
+            run_pod_sql_pgd "SELECT * FROM bdr.subscription_summary;"    "bdr_subscription_summary.out"
+            run_pod_sql_pgd "SELECT * FROM bdr.group_versions_details;"  "bdr_group_versions_details.out"
+            run_pod_sql_pgd "SELECT * FROM bdr.group_raft_details;"      "bdr_group_raft_details.out"
+            run_pod_sql_pgd "SELECT * FROM bdr.group_replslots_details;" "bdr_group_replslots_details.out"
+            run_pod_sql_pgd "SELECT * FROM bdr.event_history WHERE event_type = 'write_leader' \
 ORDER BY event_time DESC LIMIT 200;"                                 "bdr_write_leader_history.out"
 
             # bdr.subscription (per-subscription status, e.g. "down") is the
             # real signal on witness nodes - pg_stat_subscription is always
             # empty there since PGD doesn't use native logical subscriptions.
-            run_pod_sql "SELECT * FROM bdr.subscription;"            "bdr_subscription.out"
+            run_pod_sql_pgd "SELECT * FROM bdr.subscription;"            "bdr_subscription.out"
 
             # Has shown *different* rows depending on which node you query -
             # capture it per-pod, not just once for the group, so that
             # inconsistency is visible rather than hidden behind one sample.
-            run_pod_sql "SELECT * FROM bdr.proxy_config_summary ORDER BY proxy_name;" \
+            run_pod_sql_pgd "SELECT * FROM bdr.proxy_config_summary ORDER BY proxy_name;" \
                                                                        "bdr_proxy_config_summary.out"
 
             # Native CLI, per-node view (complements the one-shot group CLI
-            # calls in section 6 below).
+            # calls in section 6 below). --dsn must point at PGD_DB, same
+            # reasoning as above - without it this silently returns nothing.
             "$KCMD" exec -n "$NAMESPACE" "$POD" -c postgres -- \
-                pgd replication show --slots > "$POD_DIR/postgresql/pgd_replication_slots.out" 2>/dev/null || true
+                pgd replication show --slots --dsn "dbname=${PGD_DB}" \
+                > "$POD_DIR/postgresql/pgd_replication_slots.out" 2>/dev/null || true
         fi
-
-        # Per-database deep dive
-        local DB_LIST
-        DB_LIST=$("$KCMD" exec -n "$NAMESPACE" "$POD" -c postgres -- \
-            psql -U postgres -t -c \
-            "SELECT datname FROM pg_database WHERE datallowconn AND datname NOT LIKE 'template%';" \
-            2>/dev/null | xargs)
 
         for DB in $DB_LIST; do
             echo "     -> Collecting from Database: $DB"
@@ -644,14 +676,25 @@ if [ "$IS_PGD" = true ] && [ -n "$FIRST_PGD_POD_NAME" ]; then
     echo "=== Collecting PGD/BDR group-wide diagnostics (via ${FIRST_PGD_POD_NAME}) ==="
     GDIR="$MAIN_DIR/pgd_group_info"
 
-    # Native `pgd` CLI - opportunistic. It ships inside the postgresql-pgd
-    # image on most PGD4K builds, but needs a resolvable DSN/local auth to
-    # run non-interactively. If these files come back empty, re-run manually
-    # with an explicit --dsn against one of the pods.
-    for SUBCMD in check-health show-groups show-nodes show-raft; do
-        OUTFILE="pgd_$(echo "$SUBCMD" | tr '-' '_').out"
+    # Native `pgd` CLI - group-wide. Command syntax below follows the
+    # current pgd CLI's noun+verb structure (e.g. `pgd cluster show`,
+    # `pgd nodes list`) - older flat subcommands like "check-health" or
+    # "show-nodes" don't exist on current builds and silently returned
+    # nothing. --dsn must also point at the actual BDR-enabled database
+    # (PGD_GROUP_DB, discovered per-pod above; falls back to "app", the
+    # CNP/PGD4K bootstrap default) - without it the CLI silently returns
+    # empty output too.
+    PGD_GROUP_DB="${FIRST_PGD_POD_DB:-app}"
+    PGD_CLI_OUTFILES=(pgd_cluster_show pgd_cluster_verify pgd_nodes_list pgd_groups_list \
+        pgd_replication_show pgd_raft_show pgd_events_show pgd_commit_scope_list)
+    PGD_CLI_SUBCMDS=("cluster show" "cluster verify --verbose" "nodes list" "groups list" \
+        "replication show" "raft show" "events show" "commit-scope list")
+
+    for i in "${!PGD_CLI_OUTFILES[@]}"; do
+        OUTFILE="${PGD_CLI_OUTFILES[$i]}.out"
+        SUBCMD="${PGD_CLI_SUBCMDS[$i]}"
         "$KCMD" exec -n "$FIRST_PGD_POD_NS" "$FIRST_PGD_POD_NAME" -c postgres -- \
-            pgd "$SUBCMD" > "$GDIR/$OUTFILE" 2>/dev/null || true
+            pgd $SUBCMD --dsn "dbname=${PGD_GROUP_DB}" > "$GDIR/$OUTFILE" 2>/dev/null || true
     done
 
     "$KCMD" get pgdgroups -A -o yaml > "$GDIR/pgdgroups.yaml" 2>/dev/null || true
