@@ -10,7 +10,7 @@ Install the plugin using the following command (no `sudo` required):
 curl -sSfL https://github.com/EnterpriseDB/kubectl-cnp-diagnostic/raw/main/install.sh | sh
 ```
 
-> **Note**: This script downloads the `kubectl-edbdiag` binary, installs it to `~/.local/bin` (your own user directory — no root/admin privileges needed), and adds that path to your shell's PATH if it isn't already there — so both `kubectl edbdiag` and a bare `kubectl-edbdiag` work afterwards. `sudo` is intentionally not used: on many corporate-managed Macs, `sudo` triggers an MDM/endpoint-security elevation prompt that can hang a piped install with no visible output.
+> **Note**: This script downloads the `kubectl-edbdiag` binary, installs it to `~/.local/bin` (your own user directory, no root/admin privileges needed), and adds that path to your shell's PATH if it isn't already there, so both `kubectl edbdiag` and a bare `kubectl-edbdiag` work afterwards. `sudo` is intentionally not used: on many corporate-managed Macs, `sudo` triggers an MDM/endpoint-security elevation prompt that can hang a piped install with no visible output.
 
 ## 🪟 Windows Installation
 
@@ -28,14 +28,14 @@ internally, which needs a live connection. Instead, fetch the plugin on a
 machine that does have internet access, then transfer just that one file
 over.
 
-**Step 1 — on a machine WITH internet access**, download just the plugin
+**Step 1: on a machine WITH internet access**, download just the plugin
 (no need to clone the whole repo):
 ```
 curl -sSfLo kubectl-edbdiag https://raw.githubusercontent.com/EnterpriseDB/kubectl-cnp-diagnostic/main/kubectl-edbdiag
 chmod +x kubectl-edbdiag
 ```
 
-Optionally confirm what you're about to transfer is genuinely current
+Optionally, confirm that what you're about to transfer is genuinely current
 before shipping it over:
 ```
 sha256sum kubectl-edbdiag
@@ -43,7 +43,7 @@ curl -s https://raw.githubusercontent.com/EnterpriseDB/kubectl-cnp-diagnostic/ma
 ```
 (both hashes should match)
 
-**Step 2 — transfer the single file** to the offline bastion/production
+**Step 2: transfer the single file** to the offline bastion/production
 host:
 ```
 scp kubectl-edbdiag user@bastion-host:/home/user/
@@ -52,7 +52,7 @@ If `scp` itself is blocked by the user's egress rules, `rsync`, `sftp`, or
 even attaching it to an internal ticket/file-share works just as well — it's
 one small plain-text script, not a binary.
 
-**Step 3 — on the bastion/production host itself** (no internet needed from
+**Step 3: on the bastion/production host itself** (no internet needed from
 here on):
 ```
 mkdir -p ~/.local/bin
@@ -61,7 +61,7 @@ chmod +x ~/.local/bin/kubectl-edbdiag
 export PATH="$HOME/.local/bin:$PATH"     # add this line to ~/.bashrc or ~/.zshrc to persist it
 ```
 
-**Step 4 — verify and run:**
+**Step 4: verify and run:**
 ```
 kubectl edbdiag version     # confirms the SHA-256 matches what you fetched in Step 1
 kubectl edbdiag --help
