@@ -2,25 +2,15 @@
 
 A specialized `kubectl` plugin designed to collect deep diagnostic information from EDB Postgres for Kubernetes (CNP), CloudNativePG (CNPG), and EDB Postgres Distributed for Kubernetes (PGD4K) clusters.
 
-> **Read-only and safe to run:** This tool never modifies your cluster and never collects credentials or secret values. Only secret names/types, never contents. See "What is collected?" below for the full list.
-
 ## 🐧 Mac OS and Linux Installation
 
-Install the plugin globally using the following command:
+Install the plugin using the following command (no `sudo` required):
 
 ```
 curl -sSfL https://github.com/EnterpriseDB/kubectl-cnp-diagnostic/raw/main/install.sh | sh
 ```
 
-> **Note**: This script downloads the `kubectl-edbdiag` binary, installs it to `~/.local/bin`, and adds that path to your shell's PATH if it isn't already there, so both `kubectl edbdiag` and a bare `kubectl-edbdiag` work afterwards.
-
-**If the command above hangs or times out:** some corporate networks (Netskope, Zscaler, and similar SSL-inspecting proxies) silently block GitHub's raw-content URLs. Use this instead:
-
-```
-git clone https://github.com/EnterpriseDB/kubectl-cnp-diagnostic.git
-cd kubectl-cnp-diagnostic
-bash install.sh
-```
+> **Note**: This script downloads the `kubectl-edbdiag` binary, installs it to `~/.local/bin` (your own user directory — no root/admin privileges needed), and adds that path to your shell's PATH if it isn't already there — so both `kubectl edbdiag` and a bare `kubectl-edbdiag` work afterwards. `sudo` is intentionally not used: on many corporate-managed Macs, `sudo` triggers an MDM/endpoint-security elevation prompt that can hang a piped install with no visible output.
 
 ## 🪟 Windows Installation
 
@@ -43,27 +33,83 @@ or
 kubectl-edbdiag
 ```
 
-The tool auto-detects whether you're on plain Kubernetes or OpenShift (`oc`) and uses the right CLI for every command. At any prompt, you can type `q` (or `quit`/`exit`) to stop without collecting anything.
+The tool auto-detects whether you're on plain Kubernetes or OpenShift (`oc`) and uses the right CLI for every command. At any prompt you can type `q` (or `quit`/`exit`) to stop without collecting anything.
 
 ### What is collected?
 The tool generates a comprehensive `.tar.gz` package including:
-* **Operator Variant**: CNP, CNPG, or PGD4K selected first, before any cluster/namespace input.
+* **Operator Variant**: CNP, CNPG, or PGD4K — selected first, before any cluster/namespace input.
 * **Collection Scope**:
-    * CNP/CNPG: collect every cluster across every namespace, or a single named cluster.
-    * PGD4K: since a PGD group is made up of multiple per-node `Cluster` resources (often across namespaces), the tool auto-discovers all of them and lets you collect the whole group, one namespace, or a single node.
+    * CNP/CNPG — collect every cluster across every namespace, or a single named cluster.
+    * PGD4K — since a PGD group is made up of multiple per-node `Cluster` resources (often across namespaces), the tool auto-discovers all of them and lets you collect the whole group, one namespace, or a single node.
 * **Cluster Level**: Status, full/cleaned YAML manifests, `describe` output, namespace events, ScheduledBackups, Jobs, PGDGroupCleanups, PVCs, Secrets (names/types only — never contents), and the Namespace definition (captures OpenShift SCC/UID-range annotations).
 * **Operator Level**: Version tags, deployment manifests, controller logs, and RBAC (operator ClusterRole, OLM-owned ClusterRoles, ClusterRoleBindings).
 * **Pod Level**: `describe` output, OpenShift SCC/security-context annotation, and logs for **every container and init container** on the pod (not just `postgres`).
-* **`pods-logs/`**: every pod's logs (data nodes, operator, and on PGD4K proxy pods) are also mirrored flat into one top-level folder as `<namespace>__<pod>__<container>.log`, so you can grep across the whole run without walking the nested tree.
+* **`pods-logs/`**: every pod's logs (data nodes, operator, and — on PGD4K — proxy pods) are also mirrored flat into one top-level folder as `<namespace>__<pod>__<container>.log`, so you can grep across the whole run without walking the nested tree.
 * **Database Stats**: Collected for **every** database in the cluster:
     * **Performance**: Detailed lock analysis (`pg_locks`) and session activity (`pg_stat_activity`).
     * **Blocking Analysis**: Advanced detection of blocked PIDs and blocking statements.
     * **Storage**: Table and Index bloat reports with live/dead tuple counts.
     * **Maintenance**: Extension lists, database versions, and `SHOW ALL` parameters.
-    * **Replication**: Slot details with retained-WAL size, `pg_stat_subscription`, and role OIDs (`pg_roles`) useful for spotting a role created independently on each node instead of via replicated DDL.
+    * **Replication**: Slot detail with retained-WAL size, `pg_stat_subscription`, and role OIDs (`pg_roles`) — useful for spotting a role created independently on each node instead of via replicated DDL.
 * **PGD4K-specific**: per-node BDR/PGD catalog views (`bdr.node_summary`, `bdr.node_slots`, `bdr.worker_errors`, `bdr.subscription_summary`, `bdr.subscription`, `bdr.group_versions_details`, `bdr.group_raft_details`, `bdr.group_replslots_details`, `bdr.proxy_config_summary`, `write_leader` history), the native `pgd` CLI (`check-health`, `show-groups`, `show-nodes`, `show-raft`, `replication show --slots`), PGDGroup/PGDGroupCleanup manifests, and dedicated `describe`+logs for PGD Proxy pods.
+---
 
-> **Note on data handling:** `postgres.log` is collected in full. If your cluster has verbose SQL logging enabled (e.g. `log_statement = all`), that log could contain literal query values. Review the generated `.tar.gz` before sharing it if your organization has strict data-handling requirements.
+## 🤖 Non-Interactive / Scripted Usage
+
+Every prompt can be pre-answered with a flag, which makes it possible to loop
+this tool unattended across many clusters — handy when you only reach those
+clusters through a jump host / bastion, one `oc login` at a time.
+
+```
+  --variant=cnp|cnpg|pgd4k       Operator variant (skips the variant menu)
+  --scope=all|namespace|single   Collection scope (skips the scope menu)
+                                    all       - every cluster/node found
+                                    namespace - every cluster in --namespace
+                                    single    - exactly --namespace + --cluster
+  --namespace=NAME                Required for scope=namespace or scope=single
+  --cluster=NAME                  Required for scope=single
+  -y, --yes, --non-interactive    Fail fast instead of prompting if
+                                   --variant or --scope wasn't also given
+  -h, --help                      Show full help and exit
+```
+
+Any flag you leave out just falls back to its normal interactive prompt — you
+can mix and match, or supply everything for a fully unattended run.
+
+**One specific cluster, no prompts:**
+```
+kubectl edbdiag --variant cnp --scope single --namespace prod --cluster pg-main -y
+```
+
+**Every PGD4K node/cluster in the current context:**
+```
+kubectl edbdiag --variant pgd4k --scope all -y
+```
+
+**Looping across several remote OpenShift clusters from one bastion host** —
+if you already have live `oc login` sessions cached as kubeconfig contexts:
+```
+for ctx in $(oc config get-contexts -o name); do
+    echo "=== $ctx ==="
+    oc config use-context "$ctx"
+    kubectl edbdiag --variant pgd4k --scope all -y
+done
+```
+
+Or, if each cluster needs a fresh token-based login (tokens usually expire),
+keep a `server,token` pair per line in a file only you can read
+(`chmod 600 clusters.csv`), and delete it once you're done:
+```
+while IFS=, read -r server token; do
+    echo "=== Logging into $server ==="
+    oc login --token="$token" --server="$server" >/dev/null
+    kubectl edbdiag --variant pgd4k --scope all -y
+done < clusters.csv
+```
+
+Each iteration produces its own self-contained `.tar.gz`, so you end up with
+one clean bundle per cluster rather than one mixed archive.
+
 ---
 
 ## 📋 Usage Example
@@ -107,12 +153,12 @@ Collecting operator-level info...
      -> Collecting from Database: edb
      -> Collecting from Database: app
   --- Processing Pod: postgresql-advanced-cluster-2 ---
-  --- Processing Pod: postgresql-advanced-cluster-3 ---
+  --- Processing Pod: postgresql-advanced-cluster-4 ---
 --------------------------------------------------------
 Collection complete: edb_diag_postgresql-advanced-cluster_20260810_205527.tar.gz
 ```
 
-For PGD4K, the flow is the same up through variant selection, then instead of asking for one namespace/cluster, it auto-discovers every node-cluster in the group:
+For PGD4K, the flow is the same up through variant selection, then instead of asking for one namespace/cluster it auto-discovers every node-cluster in the group:
 
 ```
 $ kubectl-edbdiag
@@ -226,7 +272,7 @@ The tool organizes results by cluster, pod, and database for easy troubleshootin
 │           │   └── scc_and_security_context.txt
 │           ├── postgresql-advanced-cluster-2
 │           │
-│           └── postgresql-advanced-cluster-3
+│           └── postgresql-advanced-cluster-4
 │
 ├── operator_info
 │   ├── barman_plugin_version.txt
@@ -251,12 +297,12 @@ The tool organizes results by cluster, pod, and database for easy troubleshootin
 │   ├── default__postgresql-advanced-cluster-2__plugin-barman-cloud.log
 │   ├── default__postgresql-advanced-cluster-2__postgres_previous.log
 │   ├── default__postgresql-advanced-cluster-2__postgres.log
-│   ├── default__postgresql-advanced-cluster-3__bootstrap-controller_previous.log
-│   ├── default__postgresql-advanced-cluster-3__bootstrap-controller.log
-│   ├── default__postgresql-advanced-cluster-3__plugin-barman-cloud_previous.log
-│   ├── default__postgresql-advanced-cluster-3__plugin-barman-cloud.log
-│   ├── default__postgresql-advanced-cluster-3__postgres_previous.log
-│   ├── default__postgresql-advanced-cluster-3__postgres.log
+│   ├── default__postgresql-advanced-cluster-4__bootstrap-controller_previous.log
+│   ├── default__postgresql-advanced-cluster-4__bootstrap-controller.log
+│   ├── default__postgresql-advanced-cluster-4__plugin-barman-cloud_previous.log
+│   ├── default__postgresql-advanced-cluster-4__plugin-barman-cloud.log
+│   ├── default__postgresql-advanced-cluster-4__postgres_previous.log
+│   ├── default__postgresql-advanced-cluster-4__postgres.log
 │   ├── postgresql-operator-system__postgresql-operator-controller-manager-754f87c5b-bqv9n__manager_previous.log
 │   └── postgresql-operator-system__postgresql-operator-controller-manager-754f87c5b-bqv9n__manager.log
 └── storage

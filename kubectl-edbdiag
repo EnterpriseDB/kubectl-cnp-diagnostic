@@ -11,6 +11,86 @@
 set -uo pipefail
 
 # ------------------------------------------------------------
+# ARGUMENT PARSING (all optional - lets this run unattended, e.g.
+# looped across many remote clusters from one bastion/login session:
+#   for ctx in $(oc config get-contexts -o name); do
+#       oc config use-context "$ctx"
+#       kubectl edbdiag --variant pgd4k --scope all -y
+#   done
+# Any flag left out just falls back to its original interactive prompt.
+# ------------------------------------------------------------
+PRESET_VARIANT=""
+PRESET_SCOPE=""
+PRESET_NAMESPACE=""
+PRESET_CLUSTER=""
+NONINTERACTIVE=false
+
+print_usage() {
+    cat <<'USAGE'
+Usage: kubectl edbdiag [OPTIONS]
+
+Run with no options for the original interactive prompts. Every option
+below only overrides the one prompt it corresponds to - mix and match,
+or supply all of them for a fully unattended run.
+
+  --variant=cnp|cnpg|pgd4k       Operator variant (skips the variant menu)
+  --scope=all|namespace|single   Collection scope (skips the scope menu)
+                                    all       - every cluster/node found
+                                    namespace - every cluster in --namespace
+                                    single    - exactly --namespace + --cluster
+  --namespace=NAME                Required for scope=namespace or scope=single
+  --cluster=NAME                  Required for scope=single
+  -y, --yes, --non-interactive    Fail fast instead of prompting if
+                                   --variant or --scope wasn't also given
+  -h, --help                      Show this help and exit
+
+Examples:
+  # One specific CNP cluster, no prompts:
+  kubectl edbdiag --variant cnp --scope single --namespace prod --cluster pg-main -y
+
+  # Every PGD4K node/cluster reachable in the current context:
+  kubectl edbdiag --variant pgd4k --scope all -y
+
+  # Loop across several remote OpenShift clusters from one bastion host:
+  while IFS=, read -r server token; do
+      oc login --token="$token" --server="$server" >/dev/null
+      kubectl edbdiag --variant pgd4k --scope all -y
+  done < clusters.csv
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --variant=*)   PRESET_VARIANT="${1#*=}" ;;
+        --variant)     PRESET_VARIANT="${2:-}"; shift ;;
+        --scope=*)     PRESET_SCOPE="${1#*=}" ;;
+        --scope)       PRESET_SCOPE="${2:-}"; shift ;;
+        --namespace=*) PRESET_NAMESPACE="${1#*=}" ;;
+        --namespace)   PRESET_NAMESPACE="${2:-}"; shift ;;
+        --cluster=*)   PRESET_CLUSTER="${1#*=}" ;;
+        --cluster)     PRESET_CLUSTER="${2:-}"; shift ;;
+        -y|--yes|--non-interactive) NONINTERACTIVE=true ;;
+        -h|--help) print_usage; exit 0 ;;
+        *)
+            echo "ERROR: Unrecognized option '$1'. Use --help for usage." >&2
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+PRESET_VARIANT=$(echo "$PRESET_VARIANT" | tr '[:upper:]' '[:lower:]')
+PRESET_SCOPE=$(echo "$PRESET_SCOPE" | tr '[:upper:]' '[:lower:]')
+
+# In unattended mode, missing required flags must fail fast here rather
+# than falling through to a `read` that has no terminal to read from
+# (which would silently take an empty default instead of erroring).
+if [ "$NONINTERACTIVE" = true ]; then
+    [ -z "$PRESET_VARIANT" ] && { echo "ERROR: --non-interactive requires --variant=cnp|cnpg|pgd4k." >&2; exit 1; }
+    [ -z "$PRESET_SCOPE" ]   && { echo "ERROR: --non-interactive requires --scope=all|namespace|single." >&2; exit 1; }
+fi
+
+# ------------------------------------------------------------
 # 0. PRE-FLIGHT CHECKS + CLI DETECTION (oc vs kubectl)
 # ------------------------------------------------------------
 check_cmd() {
@@ -141,18 +221,75 @@ save_all_pod_logs() {
     done
 }
 
+# Different `pgd` CLI builds have used different subcommand spellings for
+# the same information (e.g. noun+verb "nodes list"/"cluster verify" on some
+# builds, "nodes show"/"verify-cluster" on others, and legacy flat
+# "show-nodes"/"check-health" on older ones) - hardcoding one spelling is
+# exactly what broke this earlier (old flat subcommands silently returned
+# nothing on current CLI builds, and vice versa). Instead of guessing one
+# spelling per pgd/PGD4K version, try each known candidate in order and keep
+# whichever actually runs and returns something, on whatever CLI is
+# installed on this pod right now.
+#   run_pgd_native <namespace> <pod> <dsn_db> <outfile> "<cmd1>|<cmd2>|..."
+run_pgd_native() {
+    local exec_ns="$1" exec_pod="$2" dsn_db="$3" outfile="$4" candidates="$5"
+    local cmd out rc last_out="" last_cmd=""
+    local tried=()
+    local IFS='|'
+    for cmd in $candidates; do
+        unset IFS
+        tried+=("pgd $cmd")
+        out=$("$KCMD" exec -n "$exec_ns" "$exec_pod" -c postgres -- \
+            pgd $cmd --dsn "dbname=${dsn_db}" 2>&1)
+        rc=$?
+        last_out="$out"
+        last_cmd="pgd $cmd"
+        if [ $rc -eq 0 ] && [ -n "$(echo "$out" | tr -d '[:space:]')" ]; then
+            {
+                echo "# Command: ${last_cmd} --dsn \"dbname=${dsn_db}\"  (pod: ${exec_ns}/${exec_pod})"
+                echo ""
+                echo "$out"
+            } > "$outfile"
+            return 0
+        fi
+        IFS='|'
+    done
+    unset IFS
+    {
+        echo "# None of the candidate commands below produced output on this pod's pgd CLI build:"
+        printf '#   %s\n' "${tried[@]}"
+        echo "#"
+        echo "# Last attempt (${last_cmd} --dsn \"dbname=${dsn_db}\") returned:"
+        echo "$last_out"
+    } > "$outfile"
+    return 1
+}
+
 # ------------------------------------------------------------
 # 1. OPERATOR VARIANT SELECTION (always asked first now)
 # ------------------------------------------------------------
-echo "Select Operator Variant:"
-echo "  1) EDB Postgres® AI for CloudNativePG™ Cluster (CNP)"
-echo "  2) CloudNativePG™ (CNPG)"
-echo "  3) EDB Postgres® AI for CloudNativePG™ Global Cluster (PGD4K)"
-echo "  q) Quit"
-read -rp "Enter choice [1-3, or q to quit]: " VARIANT_CHOICE
-check_quit "$VARIANT_CHOICE"
-
 IS_PGD=false
+if [ -n "$PRESET_VARIANT" ]; then
+    case "$PRESET_VARIANT" in
+        cnp)   VARIANT_CHOICE=1 ;;
+        cnpg)  VARIANT_CHOICE=2 ;;
+        pgd4k) VARIANT_CHOICE=3 ;;
+        *)
+            echo "ERROR: --variant must be one of: cnp, cnpg, pgd4k (got '${PRESET_VARIANT}')." >&2
+            exit 1
+            ;;
+    esac
+    echo "Operator Variant (from --variant): ${PRESET_VARIANT}"
+else
+    echo "Select Operator Variant:"
+    echo "  1) EDB Postgres® AI for CloudNativePG™ Cluster (CNP)"
+    echo "  2) CloudNativePG™ (CNPG)"
+    echo "  3) EDB Postgres® AI for CloudNativePG™ Global Cluster (PGD4K)"
+    echo "  q) Quit"
+    read -rp "Enter choice [1-3, or q to quit]: " VARIANT_CHOICE
+    check_quit "$VARIANT_CHOICE"
+fi
+
 case "$VARIANT_CHOICE" in
     1) OP_CMD="cnp"  ;;
     2) OP_CMD="cnpg" ;;
@@ -177,7 +314,51 @@ TARGETS=()   # each entry: "namespace|clustername"
 collect_lines ALL_CLUSTERS_RAW <<< "$("$KCMD" get cluster -A --no-headers \
     -o custom-columns="NS:.metadata.namespace,NAME:.metadata.name" 2>/dev/null)"
 
-if [ "$IS_PGD" = true ]; then
+if [ -n "$PRESET_SCOPE" ]; then
+    # Non-interactive path - shared across CNP/CNPG/PGD4K since the cluster
+    # discovery above is identical for all three variants. This is what
+    # lets the tool be looped unattended across many remote clusters from
+    # one login session (see --help for a full example).
+    case "$PRESET_SCOPE" in
+        all)
+            if [ ${#ALL_CLUSTERS_RAW[@]} -eq 0 ]; then
+                echo "ERROR: --scope=all given but no ${VARIANT_LABEL} clusters were auto-detected in this context." >&2
+                exit 1
+            fi
+            for entry in "${ALL_CLUSTERS_RAW[@]}"; do
+                NS=$(awk '{print $1}' <<< "$entry")
+                NAME=$(awk '{print $2}' <<< "$entry")
+                TARGETS+=("${NS}|${NAME}")
+            done
+            ;;
+        namespace)
+            if [ -z "$PRESET_NAMESPACE" ]; then
+                echo "ERROR: --scope=namespace requires --namespace=<name>." >&2
+                exit 1
+            fi
+            for entry in "${ALL_CLUSTERS_RAW[@]}"; do
+                NS=$(awk '{print $1}' <<< "$entry")
+                NAME=$(awk '{print $2}' <<< "$entry")
+                [ "$NS" = "$PRESET_NAMESPACE" ] && TARGETS+=("${NS}|${NAME}")
+            done
+            if [ ${#TARGETS[@]} -eq 0 ]; then
+                echo "ERROR: No ${VARIANT_LABEL} clusters found in namespace '${PRESET_NAMESPACE}'." >&2
+                exit 1
+            fi
+            ;;
+        single)
+            if [ -z "$PRESET_NAMESPACE" ] || [ -z "$PRESET_CLUSTER" ]; then
+                echo "ERROR: --scope=single requires both --namespace=<name> and --cluster=<name>." >&2
+                exit 1
+            fi
+            TARGETS+=("${PRESET_NAMESPACE}|${PRESET_CLUSTER}")
+            ;;
+        *)
+            echo "ERROR: --scope must be one of: all, namespace, single (got '${PRESET_SCOPE}')." >&2
+            exit 1
+            ;;
+    esac
+elif [ "$IS_PGD" = true ]; then
     # PGD4K: each BDR/PGD node is its own Cluster CR, so namespace and cluster
     # name are NOT fixed to a single value. Default to discovering every
     # Cluster CR so the whole PGD group gets collected in one pass.
@@ -397,7 +578,7 @@ FIRST_PGD_POD_DB=""
 collect_cluster() {
     local NAMESPACE="$1"
     local CLUSTER_NAME="$2"
-        local CDIR="$MAIN_DIR/clusters/${NAMESPACE}__${CLUSTER_NAME}"
+    local CDIR="$MAIN_DIR/clusters/${NAMESPACE}__${CLUSTER_NAME}"
     mkdir -p "$CDIR/cluster_info" "$CDIR/pods"
 
     echo "=== Collecting cluster: ${NAMESPACE}/${CLUSTER_NAME} ==="
@@ -595,12 +776,20 @@ ORDER BY event_time DESC LIMIT 200;"                                 "bdr_write_
             run_pod_sql_pgd "SELECT * FROM bdr.proxy_config_summary ORDER BY proxy_name;" \
                                                                        "bdr_proxy_config_summary.out"
 
+            # pgd CLI version on THIS pod specifically - capture per-pod (not
+            # just once for the group) since nodes can briefly run different
+            # versions mid rolling-upgrade, and this is the first thing to
+            # check if any pgd_* file below comes back empty/unexpected.
+            "$KCMD" exec -n "$NAMESPACE" "$POD" -c postgres -- \
+                pgd --version > "$POD_DIR/postgresql/pgd_cli_version.out" 2>&1 || true
+
             # Native CLI, per-node view (complements the one-shot group CLI
             # calls in section 6 below). --dsn must point at PGD_DB, same
             # reasoning as above - without it this silently returns nothing.
-            "$KCMD" exec -n "$NAMESPACE" "$POD" -c postgres -- \
-                pgd replication show --slots --dsn "dbname=${PGD_DB}" \
-                > "$POD_DIR/postgresql/pgd_replication_slots.out" 2>/dev/null || true
+            # See run_pgd_native() for why several command spellings are tried.
+            run_pgd_native "$NAMESPACE" "$POD" "$PGD_DB" \
+                "$POD_DIR/postgresql/pgd_replication_slots.out" \
+                "replication show --slots|show-replslots"
         fi
 
         for DB in $DB_LIST; do
@@ -676,26 +865,38 @@ if [ "$IS_PGD" = true ] && [ -n "$FIRST_PGD_POD_NAME" ]; then
     echo "=== Collecting PGD/BDR group-wide diagnostics (via ${FIRST_PGD_POD_NAME}) ==="
     GDIR="$MAIN_DIR/pgd_group_info"
 
-    # Native `pgd` CLI - group-wide. Command syntax below follows the
-    # current pgd CLI's noun+verb structure (e.g. `pgd cluster show`,
-    # `pgd nodes list`) - older flat subcommands like "check-health" or
-    # "show-nodes" don't exist on current builds and silently returned
-    # nothing. --dsn must also point at the actual BDR-enabled database
-    # (PGD_GROUP_DB, discovered per-pod above; falls back to "app", the
-    # CNP/PGD4K bootstrap default) - without it the CLI silently returns
-    # empty output too.
+    # Native `pgd` CLI - group-wide. --dsn must point at the actual
+    # BDR-enabled database (PGD_GROUP_DB, discovered per-pod above; falls
+    # back to "app", the CNP/PGD4K bootstrap default) - without it the CLI
+    # silently returns empty output. Each line below tries several known
+    # subcommand spellings in order (see run_pgd_native()) since different
+    # pgd CLI builds have named the same information differently - this is
+    # what actually auto-adapts to whatever version is installed, rather
+    # than hardcoding one spelling that goes stale the next time EDB renames
+    # a subcommand.
     PGD_GROUP_DB="${FIRST_PGD_POD_DB:-app}"
-    PGD_CLI_OUTFILES=(pgd_cluster_show pgd_cluster_verify pgd_nodes_list pgd_groups_list \
-        pgd_replication_show pgd_raft_show pgd_events_show pgd_commit_scope_list)
-    PGD_CLI_SUBCMDS=("cluster show" "cluster verify --verbose" "nodes list" "groups list" \
-        "replication show" "raft show" "events show" "commit-scope list")
 
-    for i in "${!PGD_CLI_OUTFILES[@]}"; do
-        OUTFILE="${PGD_CLI_OUTFILES[$i]}.out"
-        SUBCMD="${PGD_CLI_SUBCMDS[$i]}"
-        "$KCMD" exec -n "$FIRST_PGD_POD_NS" "$FIRST_PGD_POD_NAME" -c postgres -- \
-            pgd $SUBCMD --dsn "dbname=${PGD_GROUP_DB}" > "$GDIR/$OUTFILE" 2>/dev/null || true
-    done
+    "$KCMD" exec -n "$FIRST_PGD_POD_NS" "$FIRST_PGD_POD_NAME" -c postgres -- \
+        pgd --version > "$GDIR/pgd_cli_version.out" 2>&1 || true
+
+    run_pgd_native "$FIRST_PGD_POD_NS" "$FIRST_PGD_POD_NAME" "$PGD_GROUP_DB" \
+        "$GDIR/pgd_cluster_show.out"      "cluster show"
+    run_pgd_native "$FIRST_PGD_POD_NS" "$FIRST_PGD_POD_NAME" "$PGD_GROUP_DB" \
+        "$GDIR/pgd_cluster_verify.out"    "cluster verify --verbose|verify-cluster"
+    run_pgd_native "$FIRST_PGD_POD_NS" "$FIRST_PGD_POD_NAME" "$PGD_GROUP_DB" \
+        "$GDIR/pgd_nodes_list.out"        "nodes list|nodes show|show-nodes"
+    run_pgd_native "$FIRST_PGD_POD_NS" "$FIRST_PGD_POD_NAME" "$PGD_GROUP_DB" \
+        "$GDIR/pgd_groups_list.out"       "groups list|show-groups"
+    run_pgd_native "$FIRST_PGD_POD_NS" "$FIRST_PGD_POD_NAME" "$PGD_GROUP_DB" \
+        "$GDIR/pgd_replication_show.out"  "replication show|show-replslots"
+    run_pgd_native "$FIRST_PGD_POD_NS" "$FIRST_PGD_POD_NAME" "$PGD_GROUP_DB" \
+        "$GDIR/pgd_raft_show.out"         "raft show|show-raft"
+    run_pgd_native "$FIRST_PGD_POD_NS" "$FIRST_PGD_POD_NAME" "$PGD_GROUP_DB" \
+        "$GDIR/pgd_events_show.out"       "events show|show-events"
+    run_pgd_native "$FIRST_PGD_POD_NS" "$FIRST_PGD_POD_NAME" "$PGD_GROUP_DB" \
+        "$GDIR/pgd_commit_scope_list.out" "commit-scope list"
+    run_pgd_native "$FIRST_PGD_POD_NS" "$FIRST_PGD_POD_NAME" "$PGD_GROUP_DB" \
+        "$GDIR/pgd_check_health.out"      "check-health"
 
     "$KCMD" get pgdgroups -A -o yaml > "$GDIR/pgdgroups.yaml" 2>/dev/null || true
     "$KCMD" get pgdgroupcleanups -A -o yaml > "$GDIR/pgdgroupcleanups.yaml" 2>/dev/null || true
