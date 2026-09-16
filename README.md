@@ -158,7 +158,7 @@ The tool generates a comprehensive `.tar.gz` package including:
     * **Storage**: Table and Index bloat reports with live/dead tuple counts.
     * **Maintenance**: Extension lists, database versions, and `SHOW ALL` parameters.
     * **Replication**: Slot detail with retained-WAL size, `pg_stat_subscription`, and role OIDs (`pg_roles`) — useful for spotting a role created independently on each node instead of via replicated DDL.
-* **PGD4K-specific**: per-node BDR/PGD catalog views (`bdr.node_summary`, `bdr.node_slots`, `bdr.worker_errors`, `bdr.subscription_summary`, `bdr.subscription`, `bdr.group_versions_details`, `bdr.group_raft_details`, `bdr.group_replslots_details`, `bdr.proxy_config_summary`, `write_leader` history), the native `pgd` CLI (`check-health`, `show-groups`, `show-nodes`, `show-raft`, `replication show --slots`), PGDGroup/PGDGroupCleanup manifests, and dedicated `describe`+logs for PGD Proxy pods.
+* **PGD4K-specific**: per-node BDR/PGD catalog views (`bdr.node_summary`, `bdr.node_slots`, `bdr.worker_errors`, `bdr.subscription_summary`, `bdr.subscription`, `bdr.group_versions_details`, `bdr.group_raft_details`, `bdr.group_replslots_details`, `bdr.proxy_config_summary`, `write_leader` history), **plus the entire `bdr` schema catalog** dumped into `postgresql/bdr_catalog/` (every table/view auto-discovered at runtime — ~127 files on PGD 5.9.4, ~128 on 6.x, so it stays current with whatever PGD version is installed), the native `pgd` CLI (`cluster show`/`verify`, `nodes list`, `groups list`, `raft show`, `events show`, `replication show`), the pgd CLI's own version detection (so version-specific commands like the removed `check-health` are skipped cleanly on 6.x+), PGDGroup/PGDGroupCleanup manifests, and dedicated `describe`+logs for genuine PGD Proxy pods only (matched by their operator-set label, never Kubernetes' own `kube-proxy`).
 ---
 
 ## 🤖 Non-Interactive / Scripted Usage
@@ -194,7 +194,7 @@ SHA-256, so you can confirm your installed copy is byte-for-byte the latest
 fix on `main`:
 ```
 $ kubectl edbdiag version
-kubectl-edbdiag version 1.0.1 (released 2026-09-16)
+kubectl-edbdiag version 1.1.0 (released 2026-09-16)
 SHA256:  <64-character hash of your local copy>
 Compare against: https://raw.githubusercontent.com/EnterpriseDB/kubectl-cnp-diagnostic/main/kubectl-edbdiag
 ```
@@ -307,11 +307,11 @@ Detected PGD4K node clusters:
    7) region-c-1   (namespace: default)
 
 Select scope:
-  a) Collect ALL PGD4K nodes/clusters listed above (recommended - needed for group-level BDR/Raft diagnostics)
-  n) Collect only clusters within one specific namespace
-  m) Enter a single namespace + cluster manually
+  1) Collect ALL PGD4K nodes/clusters listed above (recommended - needed for group-level BDR/Raft diagnostics)
+  2) Collect only clusters within one specific namespace
+  3) Enter a single namespace + cluster manually
   q) Quit
-Enter choice [a/n/m/q] (default a): a
+Enter choice [1-3, or q] (default 1): 1
 
 Targets to collect (7): ...
 === Collecting PGD/BDR group-wide diagnostics (via region-a-1-1) ===
@@ -464,6 +464,21 @@ Same per-pod/per-database layout as above, repeated for **every node-cluster** i
 │   │           ├── postgresql
 │   │           │   ├── activity_counts.out
 │   │           │   ├── archiver.out
+│   │           │   ├── bdr_catalog
+│   │           │   │   ├── commit_scopes.out
+│   │           │   │   ├── conflict_history_summary.out
+│   │           │   │   ├── node_group_summary.out
+│   │           │   │   ├── node_summary.out
+│   │           │   │   ├── sequences.out
+│   │           │   │   ├── stat_activity.out
+│   │           │   │   ├── stat_worker.out
+│   │           │   │   ├── tables.out
+│   │           │   │   ├── triggers.out
+│   │           │   │   └── ... (~127 files on PGD 5.9.4 / ~128 on 6.x —
+│   │           │   │        every table + view in the `bdr` schema,
+│   │           │   │        auto-discovered at runtime, one `.out` per
+│   │           │   │        object; the exact set/count varies slightly
+│   │           │   │        by PGD version)
 │   │           │   ├── bdr_group_raft_details.out
 │   │           │   ├── bdr_group_replslots_details.out
 │   │           │   ├── bdr_group_versions_details.out
@@ -500,6 +515,7 @@ Same per-pod/per-database layout as above, repeated for **every node-cluster** i
 │   │           │   ├── db_version.out
 │   │           │   ├── pg_roles.out
 │   │           │   ├── pg_stat_subscription.out
+│   │           │   ├── pgd_cli_version.out
 │   │           │   ├── pgd_replication_slots.out
 │   │           │   ├── postgres_previous.log
 │   │           │   ├── postgres.log
@@ -508,8 +524,8 @@ Same per-pod/per-database layout as above, repeated for **every node-cluster** i
 │   │           │   └── show_all.out
 │   │           └── scc_and_security_context.txt
 :
-│   ├── default__region-x-x
-:
+│   ├── default__region-x-x        (same layout as region-a-1 above, repeated
+:                                    for every node-cluster in the group)
 :
 ├── operator_info
 │   ├── clusterrolebindings.yaml
@@ -521,17 +537,25 @@ Same per-pod/per-database layout as above, repeated for **every node-cluster** i
 │   ├── operator_manifest.yaml
 │   └── operator_version.txt
 ├── pgd_group_info
-│   ├── pgd_check_health.out
-│   ├── pgd_show_groups.out
-│   ├── pgd_show_nodes.out
-│   ├── pgd_show_raft.out
+│   ├── pgd_check_health.out          (or a "removed in 6.x" note - see below)
+│   ├── pgd_cli_version.out
+│   ├── pgd_cluster_show.out
+│   ├── pgd_cluster_verify.out
+│   ├── pgd_commit_scopes.out
+│   ├── pgd_events_show.out
+│   ├── pgd_groups_list.out
+│   ├── pgd_nodes_list.out
+│   ├── pgd_raft_show.out
+│   ├── pgd_replication_show.out
 │   ├── pgdgroupcleanups.yaml
 │   ├── pgdgroups.yaml
 │   └── proxy_pods
-│       └── kube-system__kube-proxy-q8jz2
-│           ├── describe_result.txt
-│           ├── kube-proxy_previous.log
-│           └── kube-proxy.log
+│       └── default__region-a-proxy-0     (only genuine PGD Proxy pods -
+│           ├── describe_result.txt         matched by their operator-set
+│           ├── postgres_previous.log       label, k8s.pgd.enterprisedb.io/
+│           └── postgres.log                workloadType=pgd-proxy - ever
+│                                            land here, never kube-proxy or
+│                                            any other unrelated system pod)
 ├── pods-logs
 │   ├── default__region-a-1-1__bootstrap-controller_previous.log
 │   ├── default__region-a-1-1__bootstrap-controller.log

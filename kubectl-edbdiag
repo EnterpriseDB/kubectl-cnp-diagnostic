@@ -20,7 +20,7 @@ set -uo pipefail
 # anyone can diff their copy against main byte-for-byte without guessing
 # whether they're on the latest fix.
 # ------------------------------------------------------------
-EDBDIAG_VERSION="1.0.1"
+EDBDIAG_VERSION="1.1.0"
 EDBDIAG_RELEASED="2026-09-16"
 
 print_version() {
@@ -432,15 +432,15 @@ elif [ "$IS_PGD" = true ]; then
         done
         echo ""
         echo "Select scope:"
-        echo "  a) Collect ALL PGD4K nodes/clusters listed above (recommended - needed for group-level BDR/Raft diagnostics)"
-        echo "  n) Collect only clusters within one specific namespace"
-        echo "  m) Enter a single namespace + cluster manually"
+        echo "  1) Collect ALL PGD4K nodes/clusters listed above (recommended - needed for group-level BDR/Raft diagnostics)"
+        echo "  2) Collect only clusters within one specific namespace"
+        echo "  3) Enter a single namespace + cluster manually"
         echo "  q) Quit"
-        read -rp "Enter choice [a/n/m/q] (default a): " PGD_SCOPE
+        read -rp "Enter choice [1-3, or q] (default 1): " PGD_SCOPE
         check_quit "$PGD_SCOPE"
 
         case "$PGD_SCOPE" in
-            n|N)
+            2)
                 read -rp "Enter the namespace to scope to: " SCOPE_NS
                 check_quit "$SCOPE_NS"
                 for entry in "${ALL_CLUSTERS_RAW[@]}"; do
@@ -449,7 +449,7 @@ elif [ "$IS_PGD" = true ]; then
                     [ "$NS" = "$SCOPE_NS" ] && TARGETS+=("${NS}|${NAME}")
                 done
                 ;;
-            m|M)
+            3)
                 read -rp "Enter the Namespace of the Cluster (or q to quit): " NAMESPACE
                 check_quit "$NAMESPACE"
                 read -rp "Enter the Cluster Name (or q to quit): " CLUSTER_NAME
@@ -844,6 +844,48 @@ ORDER BY event_time DESC LIMIT 200;"                                 "bdr_write_
             run_pgd_native "$NAMESPACE" "$POD" "$PGD_DB" \
                 "$POD_DIR/postgresql/pgd_replication_slots.out" \
                 "replication show --slots|show-replslots"
+
+            # Dump the ENTIRE bdr schema catalog (every table + view), not
+            # just the curated subset picked by hand above. This closes the
+            # gap with EDB's internal "Lasso" diagnostic tool, which dumps
+            # every bdr.* relation as its own postgresql/dbs/<db>/bdr/*.data
+            # file (confirmed against a real Lasso tree listing on ticket
+            # #65738: ~110 files) - Alexey Shishkin pointed out these are
+            # missing from edbdiag's output (ticket #65602).
+            #
+            # This is deliberately schema-discovery, not a hand-maintained
+            # list of ~110 `run_pod_sql_pgd` calls: the exact set of bdr.*
+            # objects differs by PGD version (confirmed directly against
+            # real 5.9.4 and 6.4.0 clusters - 6.x adds
+            # bdr.analytics_sync_position / bdr.parted_origin_catchup_info*
+            # / bdr.stat_receiver_transactions, 5.x has
+            # bdr.init_physical_lsn_internal that 6.x doesn't), and a fixed
+            # list would silently go stale the next time a PGD release adds
+            # or renames a view - the exact kind of drift that broke
+            # `pgd commit-scope list` earlier in this script's history.
+            #
+            # relkind IN ('r','v') only: partitioned parents (relkind 'p',
+            # e.g. bdr.conflict_history / bdr.event_history) and their
+            # "..._part_<start>_<end>" child partitions are excluded on
+            # purpose - selecting from the partitioned parent already reads
+            # every partition's rows via a normal inheritance-style scan, so
+            # dumping each partition separately would just be redundant and
+            # very large. This matches Lasso's own list, which also excludes
+            # conflict_history/event_history entirely.
+            mkdir -p "$POD_DIR/postgresql/bdr_catalog"
+            BDR_ENUM_SQL="SELECT c.relname FROM pg_catalog.pg_class c \
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+WHERE n.nspname = 'bdr' AND c.relkind IN ('r','v') \
+AND c.relname !~ '_part_[0-9]+_[0-9]+\$' ORDER BY 1;"
+            BDR_OBJECTS=$("$KCMD" exec -n "$NAMESPACE" "$POD" -c postgres -- \
+                psql -U postgres -d "$PGD_DB" -tA -c "$BDR_ENUM_SQL" 2>/dev/null)
+            if [ -n "$BDR_OBJECTS" ]; then
+                for BDR_OBJ in $BDR_OBJECTS; do
+                    run_pod_sql_pgd "SELECT * FROM bdr.${BDR_OBJ};" "bdr_catalog/${BDR_OBJ}.out"
+                done
+            else
+                echo "  WARNING: Could not enumerate bdr.* catalog objects on ${POD} - bdr_catalog/ will be empty."
+            fi
         fi
 
         for DB in $DB_LIST; do
