@@ -10,7 +10,7 @@ Install the plugin using the following command (no `sudo` required):
 curl -sSfL https://github.com/EnterpriseDB/kubectl-cnp-diagnostic/raw/main/install.sh | sh
 ```
 
-> **Note**: This script downloads the `kubectl-edbdiag` binary, installs it to `~/.local/bin` (your own user directory — no root/admin privileges needed), and adds that path to your shell's PATH if it isn't already there — so both `kubectl edbdiag` and a bare `kubectl-edbdiag` work afterwards. `sudo` is intentionally not used: on many corporate-managed Macs, `sudo` triggers an MDM/endpoint-security elevation prompt that can hang a piped install with no visible output.
+> **Note**: This script downloads the `kubectl-edbdiag` binary, installs it to `~/.local/bin` (your own user directory, no root/admin privileges needed), and adds that path to your shell's PATH if it isn't already there — so both `kubectl edbdiag` and a bare `kubectl-edbdiag` work afterwards. `sudo` is intentionally not used: on many corporate-managed Macs, `sudo` triggers an MDM/endpoint-security elevation prompt that can hang a piped install with no visible output.
 
 ## 🪟 Windows Installation
 
@@ -23,19 +23,19 @@ curl -sSfL https://github.com/EnterpriseDB/kubectl-cnp-diagnostic/raw/main/insta
 
 If the machine that actually has `kubectl`/`oc` access to the cluster (a
 bastion host, a locked-down production jump box, etc.) has no internet
-access at all, `install.sh` won't work there — it does a `git clone`
+access at all, `install.sh` won't work there, it does a `git clone`
 internally, which needs a live connection. Instead, fetch the plugin on a
 machine that does have internet access, then transfer just that one file
 over.
 
-**Step 1 — on a machine WITH internet access**, download just the plugin
+**Step 1: on a machine WITH internet access**, download just the plugin
 (no need to clone the whole repo):
 ```
 curl -sSfLo kubectl-edbdiag https://raw.githubusercontent.com/EnterpriseDB/kubectl-cnp-diagnostic/main/kubectl-edbdiag
 chmod +x kubectl-edbdiag
 ```
 
-Optionally confirm what you're about to transfer is genuinely current
+Optionally confirm that what you're about to transfer is genuinely current
 before shipping it over:
 ```
 sha256sum kubectl-edbdiag
@@ -43,16 +43,16 @@ curl -s https://raw.githubusercontent.com/EnterpriseDB/kubectl-cnp-diagnostic/ma
 ```
 (both hashes should match)
 
-**Step 2 — transfer the single file** to the offline bastion/production
+**Step 2: transfer the single file** to the offline bastion/production
 host:
 ```
 scp kubectl-edbdiag user@bastion-host:/home/user/
 ```
 If `scp` itself is blocked by the user's egress rules, `rsync`, `sftp`, or
-even attaching it to an internal ticket/file-share works just as well — it's
+even attaching it to an internal ticket/file-share works just as well, it's
 one small plain-text script, not a binary.
 
-**Step 3 — on the bastion/production host itself** (no internet needed from
+**Step 3: on the bastion/production host itself** (no internet needed from
 here on):
 ```
 mkdir -p ~/.local/bin
@@ -61,7 +61,7 @@ chmod +x ~/.local/bin/kubectl-edbdiag
 export PATH="$HOME/.local/bin:$PATH"     # add this line to ~/.bashrc or ~/.zshrc to persist it
 ```
 
-**Step 4 — verify and run:**
+**Step 4: verify and run:**
 ```
 kubectl edbdiag version     # confirms the SHA-256 matches what you fetched in Step 1
 kubectl edbdiag --help
@@ -71,7 +71,7 @@ kubectl edbdiag --variant pgd4k --scope all -y
 ## 🔄 Checking for Updates & Upgrading
 
 `kubectl-edbdiag` follows [Semantic Versioning](https://semver.org/)
-(`MAJOR.MINOR.PATCH`) — every commit that changes the script's actual
+(`MAJOR.MINOR.PATCH`) Every commit that changes the script's actual
 behavior bumps the version and adds an entry to
 [`CHANGELOG.md`](./CHANGELOG.md), so you always know what changed and
 whether you should upgrade.
@@ -85,7 +85,7 @@ kubectl edbdiag version
 [`CHANGELOG.md`](./CHANGELOG.md) and compare its top entry's version against
 the one you just printed.
 
-**3. Find out EXACTLY which file is actually running.** Don't skip this —
+**3. Find out EXACTLY which file is actually running.** Don't skip this 
 if you've ever manually copied the script somewhere (or installed it more
 than once), blindly re-running the installer can create a second, unused
 copy instead of upgrading the one your shell actually calls:
@@ -140,24 +140,24 @@ or
 kubectl-edbdiag
 ```
 
-The tool auto-detects whether you're on plain Kubernetes or OpenShift (`oc`) and uses the right CLI for every command. At any prompt you can type `q` (or `quit`/`exit`) to stop without collecting anything.
+The tool auto-detects whether you're on plain Kubernetes or OpenShift (`oc`) and uses the right CLI for every command. At any prompt, you can type `q` (or `quit`/`exit`) to stop without collecting anything.
 
 ### What is collected?
 The tool generates a comprehensive `.tar.gz` package including:
-* **Operator Variant**: CNP, CNPG, or PGD4K — selected first, before any cluster/namespace input.
+* **Operator Variant**: CNP, CNPG, or PGD4K selected first, before any cluster/namespace input.
 * **Collection Scope**:
-    * CNP/CNPG — collect every cluster across every namespace, or a single named cluster.
-    * PGD4K — since a PGD group is made up of multiple per-node `Cluster` resources (often across namespaces), the tool auto-discovers all of them and lets you collect the whole group, one namespace, or a single node.
-* **Cluster Level**: Status, full/cleaned YAML manifests, `describe` output, namespace events, ScheduledBackups, Jobs, PGDGroupCleanups, PVCs, Secrets (names/types only — never contents), and the Namespace definition (captures OpenShift SCC/UID-range annotations).
+    * CNP/CNPG: collect every cluster across every namespace, or a single named cluster.
+    * PGD4K: since a PGD group is made up of multiple per-node `Cluster` resources (often across namespaces), the tool auto-discovers all of them and lets you collect the whole group, one namespace, or a single node.
+* **Cluster Level**: Status, full/cleaned YAML manifests, `describe` output, namespace events, ScheduledBackups, Jobs, PGDGroupCleanups, PVCs, Secrets (names/types only, never contents), and the Namespace definition (captures OpenShift SCC/UID-range annotations).
 * **Operator Level**: Version tags, deployment manifests, controller logs, and RBAC (operator ClusterRole, OLM-owned ClusterRoles, ClusterRoleBindings).
 * **Pod Level**: `describe` output, OpenShift SCC/security-context annotation, and logs for **every container and init container** on the pod (not just `postgres`).
-* **`pods-logs/`**: every pod's logs (data nodes, operator, and — on PGD4K — proxy pods) are also mirrored flat into one top-level folder as `<namespace>__<pod>__<container>.log`, so you can grep across the whole run without walking the nested tree.
+* **`pods-logs/`**: every pod's logs (data nodes, operator, and on PGD4K proxy pods) are also mirrored flat into one top-level folder as `<namespace>__<pod>__<container>.log`, so you can grep across the whole run without walking the nested tree.
 * **Database Stats**: Collected for **every** database in the cluster:
     * **Performance**: Detailed lock analysis (`pg_locks`) and session activity (`pg_stat_activity`).
     * **Blocking Analysis**: Advanced detection of blocked PIDs and blocking statements.
     * **Storage**: Table and Index bloat reports with live/dead tuple counts.
     * **Maintenance**: Extension lists, database versions, and `SHOW ALL` parameters.
-    * **Replication**: Slot detail with retained-WAL size, `pg_stat_subscription`, and role OIDs (`pg_roles`) — useful for spotting a role created independently on each node instead of via replicated DDL.
+    * **Replication**: Slot details with retained-WAL size, `pg_stat_subscription`, and role OIDs (`pg_roles`) — useful for spotting a role created independently on each node instead of via replicated DDL.
 * **PGD4K-specific**: per-node BDR/PGD catalog views (`bdr.node_summary`, `bdr.node_slots`, `bdr.worker_errors`, `bdr.subscription_summary`, `bdr.subscription`, `bdr.group_versions_details`, `bdr.group_raft_details`, `bdr.group_replslots_details`, `bdr.proxy_config_summary`, `write_leader` history), the native `pgd` CLI (`check-health`, `show-groups`, `show-nodes`, `show-raft`, `replication show --slots`), PGDGroup/PGDGroupCleanup manifests, and dedicated `describe`+logs for PGD Proxy pods.
 ---
 
@@ -165,7 +165,7 @@ The tool generates a comprehensive `.tar.gz` package including:
 
 Every prompt can be pre-answered with a flag, which makes it possible to loop
 this tool unattended across many clusters — handy when you only reach those
-clusters through a jump host / bastion, one `oc login` at a time.
+clusters through a jump host/bastion, one `oc login` at a time.
 
 ```
   --variant=cnp|cnpg|pgd4k       Operator variant (skips the variant menu)
@@ -182,7 +182,7 @@ clusters through a jump host / bastion, one `oc login` at a time.
   -h, --help                      Show full help and exit
 ```
 
-Any flag you leave out just falls back to its normal interactive prompt — you
+Any flag you leave out just falls back to its normal interactive prompt, you
 can mix and match, or supply everything for a fully unattended run.
 
 **Checking which version you're running:**
@@ -212,7 +212,7 @@ kubectl edbdiag --variant pgd4k --scope all -y
 ```
 
 **Looping across several remote OpenShift clusters from one bastion host** —
-if you already have live `oc login` sessions cached as kubeconfig contexts:
+If you already have live `oc login` sessions cached as kubeconfig contexts:
 ```
 for ctx in $(oc config get-contexts -o name); do
     echo "=== $ctx ==="
@@ -222,7 +222,7 @@ done
 ```
 
 Or, if each cluster needs a fresh token-based login (tokens usually expire),
-keep a `server,token` pair per line in a file only you can read
+keep a `server, token` pair per line in a file only you can read
 (`chmod 600 clusters.csv`), and delete it once you're done:
 ```
 while IFS=, read -r server token; do
@@ -283,7 +283,7 @@ Collecting operator-level info...
 Collection complete: edb_diag_postgresql-advanced-cluster_20260810_205527.tar.gz
 ```
 
-For PGD4K, the flow is the same up through variant selection, then instead of asking for one namespace/cluster it auto-discovers every node-cluster in the group:
+For PGD4K, the flow is the same up through variant selection, then instead of asking for one namespace/cluster, it auto-discovers every node-cluster in the group:
 
 ```
 $ kubectl-edbdiag
