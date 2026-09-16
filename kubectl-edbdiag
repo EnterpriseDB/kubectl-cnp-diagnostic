@@ -899,8 +899,24 @@ if [ "$IS_PGD" = true ] && [ -n "$FIRST_PGD_POD_NAME" ]; then
     # a subcommand.
     PGD_GROUP_DB="${FIRST_PGD_POD_DB:-app}"
 
-    "$KCMD" exec -n "$FIRST_PGD_POD_NS" "$FIRST_PGD_POD_NAME" -c postgres -- \
-        pgd --version > "$GDIR/pgd_cli_version.out" 2>&1 || true
+    # Detect the pgd CLI version FIRST, before collecting anything else, so
+    # version-specific commands below can be skipped cleanly instead of
+    # burning an attempt and leaving a generic "no candidates worked" message.
+    # Confirmed by direct testing against real 5.9.4 and 6.4.0 clusters: once
+    # `user=postgres` is in the --dsn (see run_pgd_native), every noun+verb
+    # subcommand below (cluster show/verify, nodes list, groups list,
+    # replication show, raft show, events show) works identically on both
+    # versions - the ONLY genuine version difference found is `check-health`,
+    # a legacy top-level command that 6.x removed outright.
+    PGD_CLI_VERSION_RAW=$("$KCMD" exec -n "$FIRST_PGD_POD_NS" "$FIRST_PGD_POD_NAME" -c postgres -- \
+        pgd --version 2>&1)
+    echo "$PGD_CLI_VERSION_RAW" > "$GDIR/pgd_cli_version.out"
+    PGD_CLI_MAJOR=$(echo "$PGD_CLI_VERSION_RAW" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 | cut -d. -f1)
+    if [ -n "$PGD_CLI_MAJOR" ]; then
+        echo "  Detected pgd CLI major version: ${PGD_CLI_MAJOR}.x"
+    else
+        echo "  WARNING: Could not parse pgd CLI version from: ${PGD_CLI_VERSION_RAW}"
+    fi
 
     run_pgd_native "$FIRST_PGD_POD_NS" "$FIRST_PGD_POD_NAME" "$PGD_GROUP_DB" \
         "$GDIR/pgd_cluster_show.out"      "cluster show"
@@ -916,10 +932,29 @@ if [ "$IS_PGD" = true ] && [ -n "$FIRST_PGD_POD_NAME" ]; then
         "$GDIR/pgd_raft_show.out"         "raft show|show-raft"
     run_pgd_native "$FIRST_PGD_POD_NS" "$FIRST_PGD_POD_NAME" "$PGD_GROUP_DB" \
         "$GDIR/pgd_events_show.out"       "events show|show-events"
-    run_pgd_native "$FIRST_PGD_POD_NS" "$FIRST_PGD_POD_NAME" "$PGD_GROUP_DB" \
-        "$GDIR/pgd_commit_scope_list.out" "commit-scope list"
-    run_pgd_native "$FIRST_PGD_POD_NS" "$FIRST_PGD_POD_NAME" "$PGD_GROUP_DB" \
-        "$GDIR/pgd_check_health.out"      "check-health"
+
+    # `pgd commit-scope list` is not a valid command on ANY pgd CLI build
+    # (confirmed identically broken on both 5.9.4 and 6.4.0) - `commit-scope`
+    # requires a specific scope name plus a verb (show/create/update/drop);
+    # there is no "list all" verb. Query the underlying catalog directly
+    # instead - it works the same on every PGD version, and an empty result
+    # is normal/expected on clusters with no custom durability rule defined.
+    "$KCMD" exec -n "$FIRST_PGD_POD_NS" "$FIRST_PGD_POD_NAME" -c postgres -- \
+        psql -U postgres -d "$PGD_GROUP_DB" -c "SELECT * FROM bdr.commit_scopes;" \
+        > "$GDIR/pgd_commit_scopes.out" 2>&1 || true
+
+    # `check-health` was removed as of pgd CLI 6.x (confirmed: present and
+    # working on 5.9.4, "unrecognized subcommand" on 6.4.0) - skip it outright
+    # once 6.x+ is detected rather than recording a generic failure message.
+    if [ -n "$PGD_CLI_MAJOR" ] && [ "$PGD_CLI_MAJOR" -ge 6 ] 2>/dev/null; then
+        {
+            echo "# Skipped: 'pgd check-health' was removed in pgd CLI 6.x and later"
+            echo "# (detected version: ${PGD_CLI_MAJOR}.x). Use pgd_cluster_verify.out instead."
+        } > "$GDIR/pgd_check_health.out"
+    else
+        run_pgd_native "$FIRST_PGD_POD_NS" "$FIRST_PGD_POD_NAME" "$PGD_GROUP_DB" \
+            "$GDIR/pgd_check_health.out"  "check-health"
+    fi
 
     "$KCMD" get pgdgroups -A -o yaml > "$GDIR/pgdgroups.yaml" 2>/dev/null || true
     "$KCMD" get pgdgroupcleanups -A -o yaml > "$GDIR/pgdgroupcleanups.yaml" 2>/dev/null || true
