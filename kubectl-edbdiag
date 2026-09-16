@@ -20,7 +20,7 @@ set -uo pipefail
 # anyone can diff their copy against main byte-for-byte without guessing
 # whether they're on the latest fix.
 # ------------------------------------------------------------
-EDBDIAG_VERSION="1.0.0"
+EDBDIAG_VERSION="1.0.1"
 EDBDIAG_RELEASED="2026-09-16"
 
 print_version() {
@@ -993,9 +993,20 @@ if [ "$IS_PGD" = true ] && [ -n "$FIRST_PGD_POD_NAME" ]; then
     # PGD Proxy is a separate component/Deployment from the data-node pods
     # collected in section 5 above - it needs its own describe+logs, not
     # just the connection routing visible from bdr.proxy_config_summary.
+    #
+    # This MUST be a label selector, not a name/substring match. An earlier
+    # version matched any pod name containing "-proxy-", which was too broad:
+    # Kubernetes' own built-in `kube-proxy-<hash>` pods (kube-system, present
+    # on every cluster regardless of PGD) also contain that exact substring,
+    # so they were being swept into proxy_pods/ alongside the real PGD Proxy
+    # pods - noise from a component completely unrelated to PGD. The genuine
+    # PGD Proxy StatefulSet pods carry a dedicated operator-set label instead
+    # (confirmed against a real PGD Proxy pod: k8s.pgd.enterprisedb.io/group=
+    # <group>, k8s.pgd.enterprisedb.io/workloadType=pgd-proxy), which only
+    # ever matches the real thing.
     echo "  Collecting PGD Proxy pod diagnostics..."
     mkdir -p "$GDIR/proxy_pods"
-    PROXY_PODS_RAW=$("$KCMD" get pods -A --no-headers 2>/dev/null | grep -i -- '-proxy-' )
+    PROXY_PODS_RAW=$("$KCMD" get pods -A -l 'k8s.pgd.enterprisedb.io/workloadType=pgd-proxy' --no-headers 2>/dev/null)
     if [ -n "$PROXY_PODS_RAW" ]; then
         while IFS= read -r line; do
             [ -z "${line// /}" ] && continue
@@ -1007,7 +1018,7 @@ if [ "$IS_PGD" = true ] && [ -n "$FIRST_PGD_POD_NAME" ]; then
             save_all_pod_logs "$P_NS" "$P_NAME" "$PDIR"
         done <<< "$PROXY_PODS_RAW"
     else
-        echo "  WARNING: No PGD Proxy pods found (label/name pattern '-proxy-')."
+        echo "  No PGD Proxy pods found (label k8s.pgd.enterprisedb.io/workloadType=pgd-proxy) - this PGD group may not have PGD Proxy deployed."
     fi
 fi
 
