@@ -10,7 +10,7 @@ Install the plugin using the following command (no `sudo` required):
 curl -sSfL https://github.com/EnterpriseDB/kubectl-cnp-diagnostic/raw/main/install.sh | sh
 ```
 
-> **Note**: This script downloads the `kubectl-edbdiag` binary, installs it to `~/.local/bin` (your own user directory, no root/admin privileges needed), and adds that path to your shell's PATH if it isn't already there — so both `kubectl edbdiag` and a bare `kubectl-edbdiag` work afterwards. `sudo` is intentionally not used: on many corporate-managed Macs, `sudo` triggers an MDM/endpoint-security elevation prompt that can hang a piped install with no visible output.
+> **Note**: This script downloads the `kubectl-edbdiag` binary, installs it to `~/.local/bin` (your own user directory, no root/admin privileges needed), and adds that path to your shell's PATH if it isn't already there, so both `kubectl edbdiag` and a bare `kubectl-edbdiag` work afterwards. `sudo` is intentionally not used: on many corporate-managed Macs, `sudo` triggers an MDM/endpoint-security elevation prompt that can hang a piped install with no visible output.
 
 ## 🪟 Windows Installation
 
