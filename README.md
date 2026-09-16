@@ -19,6 +19,55 @@ curl -sSfL https://github.com/EnterpriseDB/kubectl-cnp-diagnostic/raw/main/insta
 3. Move the file into that folder and rename it to `kubectl-edbdiag.exe`.
 4. Add the folder path to your system's **PATH** environment variable.
 
+## 📴 Offline / Air-Gapped Installation
+
+If the machine that actually has `kubectl`/`oc` access to the cluster (a
+bastion host, a locked-down production jump box, etc.) has no internet
+access at all, `install.sh` won't work there — it does a `git clone`
+internally, which needs a live connection. Instead, fetch the plugin on a
+machine that does have internet access, then transfer just that one file
+over.
+
+**Step 1 — on a machine WITH internet access**, download just the plugin
+(no need to clone the whole repo):
+```
+curl -sSfLo kubectl-edbdiag https://raw.githubusercontent.com/EnterpriseDB/kubectl-cnp-diagnostic/main/kubectl-edbdiag
+chmod +x kubectl-edbdiag
+```
+
+Optionally confirm what you're about to transfer is genuinely current
+before shipping it over:
+```
+sha256sum kubectl-edbdiag
+curl -s https://raw.githubusercontent.com/EnterpriseDB/kubectl-cnp-diagnostic/main/kubectl-edbdiag | sha256sum
+```
+(both hashes should match)
+
+**Step 2 — transfer the single file** to the offline bastion/production
+host:
+```
+scp kubectl-edbdiag user@bastion-host:/home/user/
+```
+If `scp` itself is blocked by the user's egress rules, `rsync`, `sftp`, or
+even attaching it to an internal ticket/file-share works just as well — it's
+one small plain-text script, not a binary.
+
+**Step 3 — on the bastion/production host itself** (no internet needed from
+here on):
+```
+mkdir -p ~/.local/bin
+mv kubectl-edbdiag ~/.local/bin/
+chmod +x ~/.local/bin/kubectl-edbdiag
+export PATH="$HOME/.local/bin:$PATH"     # add this line to ~/.bashrc or ~/.zshrc to persist it
+```
+
+**Step 4 — verify and run:**
+```
+kubectl edbdiag version     # confirms the SHA-256 matches what you fetched in Step 1
+kubectl edbdiag --help
+kubectl edbdiag --variant pgd4k --scope all -y
+```
+
 ---
 
 ## 🛠 Usage
