@@ -70,11 +70,29 @@ clusters through a jump host / bastion, one `oc login` at a time.
   --cluster=NAME                  Required for scope=single
   -y, --yes, --non-interactive    Fail fast instead of prompting if
                                    --variant or --scope wasn't also given
+  version, -v, --version          Print the script version + its own
+                                   SHA-256 and exit
   -h, --help                      Show full help and exit
 ```
 
 Any flag you leave out just falls back to its normal interactive prompt — you
 can mix and match, or supply everything for a fully unattended run.
+
+**Checking which version you're running:**
+
+Unlike the compiled `kubectl cnpg`/`kubectl cnp` plugins, `kubectl-edbdiag` is a
+plain shell script pulled straight from GitHub, so there's no build-injected
+`Commit`/`Date` to check. `kubectl edbdiag version` instead prints its own
+SHA-256, so you can confirm your installed copy is byte-for-byte the latest
+fix on `main`:
+```
+$ kubectl edbdiag version
+kubectl-edbdiag version 1.0.0 (released 2026-09-16)
+SHA256:  <64-character hash of your local copy>
+Compare against: https://raw.githubusercontent.com/EnterpriseDB/kubectl-cnp-diagnostic/main/kubectl-edbdiag
+```
+If your hash doesn't match the hash of the file at that URL, re-download and
+reinstall — you're on an older copy.
 
 **One specific cluster, no prompts:**
 ```

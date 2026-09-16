@@ -11,6 +11,33 @@
 set -uo pipefail
 
 # ------------------------------------------------------------
+# VERSION - bump EDBDIAG_VERSION/EDBDIAG_RELEASED by hand with every
+# meaningful change pushed to main. Unlike the `kubectl cnpg`/`kubectl cnp`
+# plugins (compiled Go binaries with build-time-injected Version/Commit/Date),
+# this is a plain shell script fetched straight from GitHub, so there is no
+# build step to stamp a commit hash into it automatically. Instead,
+# `kubectl edbdiag version` also prints this exact file's own SHA-256, so
+# anyone can diff their copy against main byte-for-byte without guessing
+# whether they're on the latest fix.
+# ------------------------------------------------------------
+EDBDIAG_VERSION="1.0.0"
+EDBDIAG_RELEASED="2026-09-16"
+
+print_version() {
+    local self_sha=""
+    if command -v sha256sum &>/dev/null; then
+        self_sha=$(sha256sum "$0" 2>/dev/null | awk '{print $1}')
+    elif command -v shasum &>/dev/null; then
+        self_sha=$(shasum -a 256 "$0" 2>/dev/null | awk '{print $1}')
+    fi
+    echo "kubectl-edbdiag version ${EDBDIAG_VERSION} (released ${EDBDIAG_RELEASED})"
+    if [ -n "$self_sha" ]; then
+        echo "SHA256:  ${self_sha}"
+    fi
+    echo "Compare against: https://raw.githubusercontent.com/EnterpriseDB/kubectl-cnp-diagnostic/main/kubectl-edbdiag"
+}
+
+# ------------------------------------------------------------
 # ARGUMENT PARSING (all optional - lets this run unattended, e.g.
 # looped across many remote clusters from one bastion/login session:
 #   for ctx in $(oc config get-contexts -o name); do
@@ -42,6 +69,9 @@ or supply all of them for a fully unattended run.
   --cluster=NAME                  Required for scope=single
   -y, --yes, --non-interactive    Fail fast instead of prompting if
                                    --variant or --scope wasn't also given
+  version, -v, --version          Print the script version + its own
+                                   SHA-256 (to confirm you're on the
+                                   latest fix from GitHub) and exit
   -h, --help                      Show this help and exit
 
 Examples:
@@ -70,6 +100,7 @@ while [ $# -gt 0 ]; do
         --cluster=*)   PRESET_CLUSTER="${1#*=}" ;;
         --cluster)     PRESET_CLUSTER="${2:-}"; shift ;;
         -y|--yes|--non-interactive) NONINTERACTIVE=true ;;
+        -v|--version|version) print_version; exit 0 ;;
         -h|--help) print_usage; exit 0 ;;
         *)
             echo "ERROR: Unrecognized option '$1'. Use --help for usage." >&2
