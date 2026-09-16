@@ -239,14 +239,23 @@ run_pgd_native() {
     for cmd in $candidates; do
         unset IFS
         tried+=("pgd $cmd")
+        # user=postgres is required here, unlike psql calls elsewhere which
+        # already pass -U postgres explicitly - without an explicit user,
+        # pgd CLI authenticates as the raw OS identity instead. On OpenShift
+        # (or any SCC/PSA setup assigning an arbitrary non-root UID to the
+        # pod) that OS identity is a random numeric UID, not a real Postgres
+        # role, so peer auth over the socket - or password auth if a host is
+        # given, forcing TCP - fails outright ("Peer authentication failed
+        # for user '1000850000'" / "no password supplied") regardless of
+        # which subcommand or database is otherwise correct.
         out=$("$KCMD" exec -n "$exec_ns" "$exec_pod" -c postgres -- \
-            pgd $cmd --dsn "dbname=${dsn_db}" 2>&1)
+            pgd $cmd --dsn "user=postgres dbname=${dsn_db}" 2>&1)
         rc=$?
         last_out="$out"
         last_cmd="pgd $cmd"
         if [ $rc -eq 0 ] && [ -n "$(echo "$out" | tr -d '[:space:]')" ]; then
             {
-                echo "# Command: ${last_cmd} --dsn \"dbname=${dsn_db}\"  (pod: ${exec_ns}/${exec_pod})"
+                echo "# Command: ${last_cmd} --dsn \"user=postgres dbname=${dsn_db}\"  (pod: ${exec_ns}/${exec_pod})"
                 echo ""
                 echo "$out"
             } > "$outfile"
@@ -259,7 +268,7 @@ run_pgd_native() {
         echo "# None of the candidate commands below produced output on this pod's pgd CLI build:"
         printf '#   %s\n' "${tried[@]}"
         echo "#"
-        echo "# Last attempt (${last_cmd} --dsn \"dbname=${dsn_db}\") returned:"
+        echo "# Last attempt (${last_cmd} --dsn \"user=postgres dbname=${dsn_db}\") returned:"
         echo "$last_out"
     } > "$outfile"
     return 1
