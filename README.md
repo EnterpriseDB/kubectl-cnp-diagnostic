@@ -31,7 +31,15 @@ over.
 **Step 1 — on a machine WITH internet access**, download just the plugin
 (no need to clone the whole repo):
 ```
-curl -sSfLo kubectl-edbdiag https://raw.githubusercontent.com/EnterpriseDB/kubectl-cnp-diagnostic/main/kubectl-edbdiag
+curl --connect-timeout 10 --max-time 30 -sSfLo kubectl-edbdiag https://raw.githubusercontent.com/EnterpriseDB/kubectl-cnp-diagnostic/main/kubectl-edbdiag
+chmod +x kubectl-edbdiag
+```
+If this errors out or times out after 30 seconds (some corporate
+SSL-inspecting proxies silently block `raw.githubusercontent.com`), clone
+the repo instead and copy the file out of it:
+```
+git clone --depth 1 https://github.com/EnterpriseDB/kubectl-cnp-diagnostic.git
+cp kubectl-cnp-diagnostic/kubectl-edbdiag .
 chmod +x kubectl-edbdiag
 ```
 
@@ -95,27 +103,27 @@ which kubectl-edbdiag
 ```
 
 **4. Fetch the latest copy:**
-- **Recommended** — `git clone` stays on `github.com` itself rather than
-  `raw.githubusercontent.com`. Some corporate SSL-inspecting proxies
-  (Netskope, etc.) silently hang or block direct requests to
-  `raw.githubusercontent.com` — confirmed on a real corporate network
-  while testing this exact upgrade path — while git's smart-HTTP protocol
-  against `github.com` goes through fine. This is the same reason
-  `install.sh` uses `git clone` internally instead of curl-ing the raw
-  file directly:
+- **Step 1 — try `curl` first** (`--connect-timeout`/`--max-time` matter
+  here: some corporate SSL-inspecting proxies, e.g. Netskope, silently
+  hang on `raw.githubusercontent.com` with no error and no output at all —
+  confirmed on a real corporate network while testing this exact upgrade
+  path. Without a timeout, that hang is indefinite; with one, it fails
+  loudly in 30 seconds instead so you know to move to step 2):
+  ```
+  curl --connect-timeout 10 --max-time 30 -sSfLo /tmp/kubectl-edbdiag https://raw.githubusercontent.com/EnterpriseDB/kubectl-cnp-diagnostic/main/kubectl-edbdiag
+  chmod +x /tmp/kubectl-edbdiag
+  ```
+- **Step 2 — if that errored out or timed out**, fall back to `git clone`,
+  which stays on `github.com` itself rather than `raw.githubusercontent.com`
+  and goes through fine on the same networks that block the direct curl.
+  This is the same reason `install.sh` uses `git clone` internally instead
+  of curl-ing the raw file directly:
   ```
   TMPDIR_UPGRADE=$(mktemp -d)
   git clone --depth 1 --quiet https://github.com/EnterpriseDB/kubectl-cnp-diagnostic.git "$TMPDIR_UPGRADE/repo"
   cp "$TMPDIR_UPGRADE/repo/kubectl-edbdiag" /tmp/kubectl-edbdiag
   chmod +x /tmp/kubectl-edbdiag
   rm -rf "$TMPDIR_UPGRADE"
-  ```
-- **Fallback**, if `git` isn't available: fetch directly via `curl`. This
-  works fine on many networks, but if the command below just hangs with no
-  output, `Ctrl+C` it and use the `git clone` method above instead:
-  ```
-  curl -sSfLo /tmp/kubectl-edbdiag https://raw.githubusercontent.com/EnterpriseDB/kubectl-cnp-diagnostic/main/kubectl-edbdiag
-  chmod +x /tmp/kubectl-edbdiag
   ```
 - On an air-gapped bastion: fetch it with either command above on a
   machine that *does* have internet, then transfer `/tmp/kubectl-edbdiag`
