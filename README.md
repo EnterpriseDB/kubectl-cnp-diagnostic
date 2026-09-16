@@ -105,7 +105,7 @@ which kubectl-edbdiag
   `scp`/`rsync`/`sftp` — same as the Offline Installation steps above.
 
 **5. Overwrite the EXACT path found in step 3** (not just `~/.local/bin` by
-default — overwrite wherever `which` actually pointed):
+default overwrite wherever `which` actually pointed):
 ```
 cp /tmp/kubectl-edbdiag "$(which kubectl-edbdiag)"
 chmod +x "$(which kubectl-edbdiag)"
@@ -164,7 +164,7 @@ The tool generates a comprehensive `.tar.gz` package including:
 ## 🤖 Non-Interactive / Scripted Usage
 
 Every prompt can be pre-answered with a flag, which makes it possible to loop
-this tool unattended across many clusters — handy when you only reach those
+this tool unattended across many clusters, handy when you only reach those
 clusters through a jump host/bastion, one `oc login` at a time.
 
 ```
