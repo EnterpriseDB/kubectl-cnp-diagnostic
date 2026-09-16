@@ -302,6 +302,20 @@ VARIANT_LABEL="CNP"
 [ "$IS_PGD" = true ] && VARIANT_LABEL="PGD4K"
 VARIANT_LOWER=$(lower "$VARIANT_LABEL")
 
+# CNP/PGD4K and community CNPG register DIFFERENT CRDs that both happen to
+# use the Kind "Cluster" (postgresql.k8s.enterprisedb.io for CNP/PGD4K vs
+# postgresql.cnpg.io for CNPG). If both operators are installed on the same
+# cluster - a perfectly normal setup, not an edge case - the bare short name
+# `cluster` becomes ambiguous and `get cluster -A` silently returns nothing
+# for either one instead of erroring, breaking discovery entirely. Always
+# address the fully-qualified resource name for whichever variant was
+# actually selected, so this works whether one or both operators are present.
+if [ "$OP_CMD" = "cnpg" ]; then
+    CLUSTER_RES="clusters.postgresql.cnpg.io"
+else
+    CLUSTER_RES="clusters.postgresql.k8s.enterprisedb.io"
+fi
+
 echo ""
 echo "=== Discovering ${VARIANT_LABEL} clusters in your Kubernetes context ==="
 echo ""
@@ -311,7 +325,7 @@ echo ""
 # ------------------------------------------------------------
 TARGETS=()   # each entry: "namespace|clustername"
 
-collect_lines ALL_CLUSTERS_RAW <<< "$("$KCMD" get cluster -A --no-headers \
+collect_lines ALL_CLUSTERS_RAW <<< "$("$KCMD" get "$CLUSTER_RES" -A --no-headers \
     -o custom-columns="NS:.metadata.namespace,NAME:.metadata.name" 2>/dev/null)"
 
 if [ -n "$PRESET_SCOPE" ]; then
@@ -585,7 +599,7 @@ collect_cluster() {
 
     # ---- Cluster-level diagnostics ----
     if [ "$YQ_AVAILABLE" = true ]; then
-        "$KCMD" get cluster "$CLUSTER_NAME" -n "$NAMESPACE" -o yaml 2>/dev/null | \
+        "$KCMD" get "$CLUSTER_RES" "$CLUSTER_NAME" -n "$NAMESPACE" -o yaml 2>/dev/null | \
             yq 'del(.status,
                     .metadata.uid,
                     .metadata.selfLink,
@@ -596,13 +610,13 @@ collect_cluster() {
             > "$CDIR/cluster_info/cluster_definition_clean.yaml" 2>/dev/null || true
     fi
 
-    "$KCMD" get cluster "$CLUSTER_NAME" -n "$NAMESPACE" -o yaml \
+    "$KCMD" get "$CLUSTER_RES" "$CLUSTER_NAME" -n "$NAMESPACE" -o yaml \
         > "$CDIR/cluster_info/cluster_definition_full.yaml" 2>/dev/null || true
 
     "$KCMD" "$OP_CMD" status "$CLUSTER_NAME" -n "$NAMESPACE" \
         > "$CDIR/cluster_info/cluster_status.txt" 2>/dev/null || true
 
-    "$KCMD" describe cluster "$CLUSTER_NAME" -n "$NAMESPACE" \
+    "$KCMD" describe "$CLUSTER_RES" "$CLUSTER_NAME" -n "$NAMESPACE" \
         > "$CDIR/cluster_info/cluster_describe.txt" 2>/dev/null || true
 
     "$KCMD" get backup -n "$NAMESPACE" -o yaml \
