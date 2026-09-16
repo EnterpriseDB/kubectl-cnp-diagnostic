@@ -49,16 +49,10 @@ you're picking up both sets of changes at once.
   numbered style already used by the CNP/CNPG scope menu and the top-level
   variant-selection menu. Suggested by Alexey Shishkin.
 
-## [1.0.1] - 2026-09-16 (superseded by 1.1.0 — upgrade straight to 1.1.0)
+## [1.0.1] - 2026-09-16
 
-- Fixed: PGD Proxy pod discovery (`pgd_group_info/proxy_pods/`) used a
-  `-proxy-` name/substring match, which also matched Kubernetes' own
-  built-in `kube-proxy-<hash>` pods (kube-system, present on every cluster
-  regardless of PGD) — noise from a component completely unrelated to PGD.
-  Now uses the PGD Proxy StatefulSet's actual operator-set label
-  (`k8s.pgd.enterprisedb.io/workloadType=pgd-proxy`), which only ever
-  matches genuine PGD Proxy pods. Reported by Alexey Shishkin. Recommended
-  for all PGD4K users.
+Superseded by 1.1.0 — see that entry above for details (this version's
+fix is included there in full).
 
 ## [1.0.0] - 2026-09-04
 
