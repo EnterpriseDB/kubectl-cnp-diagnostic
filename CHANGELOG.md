@@ -33,7 +33,7 @@ Nothing pending yet — this section fills in as changes are made after
   matches genuine PGD Proxy pods. Reported by Alexey Shishkin. Recommended
   for all PGD4K users.
 
-## [1.0.0] - 2026-09-16
+## [1.0.0] - 2026-09-04
 
 - Initial versioned release. Added `kubectl edbdiag version` (also `-v` /
   `--version`), which prints the script's own SHA-256 so you can confirm
