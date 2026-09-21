@@ -220,7 +220,7 @@ SHA-256, so you can confirm your installed copy is byte-for-byte the latest
 fix on `main`:
 ```
 $ kubectl edbdiag version
-kubectl-edbdiag version 1.1.0 (released 2026-09-16)
+kubectl-edbdiag version 1.1.1 (released 2026-09-21)
 SHA256:  <64-character hash of your local copy>
 Compare against: https://raw.githubusercontent.com/EnterpriseDB/kubectl-cnp-diagnostic/main/kubectl-edbdiag
 ```

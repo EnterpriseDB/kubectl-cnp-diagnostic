@@ -20,8 +20,8 @@ set -uo pipefail
 # anyone can diff their copy against main byte-for-byte without guessing
 # whether they're on the latest fix.
 # ------------------------------------------------------------
-EDBDIAG_VERSION="1.1.0"
-EDBDIAG_RELEASED="2026-09-16"
+EDBDIAG_VERSION="1.1.1"
+EDBDIAG_RELEASED="2026-09-21"
 
 print_version() {
     local self_sha=""
@@ -352,8 +352,17 @@ VARIANT_LOWER=$(lower "$VARIANT_LABEL")
 # actually selected, so this works whether one or both operators are present.
 if [ "$OP_CMD" = "cnpg" ]; then
     CLUSTER_RES="clusters.postgresql.cnpg.io"
+    # Community CNPG labels its Backup CRs with cnpg.io/cluster (confirmed
+    # in the operator's own source: pkg/utils/labels_annotations.go,
+    # ClusterLabelName = "cnpg.io/cluster"). Used below to scope backup
+    # collection to just this cluster.
+    BACKUP_CLUSTER_LABEL="cnpg.io/cluster"
 else
     CLUSTER_RES="clusters.postgresql.k8s.enterprisedb.io"
+    # CNP/PGD4K's fork uses k8s.enterprisedb.io/cluster instead - confirmed
+    # directly against real Backup CRs on both a CNP cluster and a PGD4K
+    # cluster.
+    BACKUP_CLUSTER_LABEL="k8s.enterprisedb.io/cluster"
 fi
 
 echo ""
@@ -659,9 +668,27 @@ collect_cluster() {
     "$KCMD" describe "$CLUSTER_RES" "$CLUSTER_NAME" -n "$NAMESPACE" \
         > "$CDIR/cluster_info/cluster_describe.txt" 2>/dev/null || true
 
-    "$KCMD" get backup -n "$NAMESPACE" -o yaml \
+    # Scoped to THIS cluster via the label the operator itself puts on the
+    # Backup CR (BACKUP_CLUSTER_LABEL, set above) - an earlier version
+    # collected every Backup in the namespace unfiltered, which mixed
+    # different clusters' backups together whenever more than one cluster
+    # shares a namespace.
+    "$KCMD" get backup -n "$NAMESPACE" -l "${BACKUP_CLUSTER_LABEL}=${CLUSTER_NAME}" -o yaml \
         > "$CDIR/cluster_info/backups.yaml" 2>/dev/null || true
-    "$KCMD" "$OP_CMD" get backups "$CLUSTER_NAME" -n "$NAMESPACE" \
+
+    # `kubectl cnp`/`kubectl cnpg` has no "get" verb at all - the plugin only
+    # exposes `backup <cluster>` to CREATE a new backup, never to list
+    # existing ones. Confirmed directly against a live cluster:
+    # `Error: unknown command "get" for "kubectl cnp"`. That error was being
+    # silently swallowed by `2>/dev/null || true`, so backups_summary.txt has
+    # been an empty file since this line was first written - not a
+    # regression, a long-standing latent bug caught by Alexey Shishkin
+    # noticing it was empty even with completed backups sitting right there
+    # in backups.yaml. Build a genuine summary table from the Backup CRs
+    # directly instead - this needs no plugin at all, so it works
+    # identically on CNP, CNPG, and PGD4K.
+    "$KCMD" get backup -n "$NAMESPACE" -l "${BACKUP_CLUSTER_LABEL}=${CLUSTER_NAME}" \
+        -o custom-columns='NAME:.metadata.name,PHASE:.status.phase,METHOD:.status.method,STARTED:.status.startedAt,STOPPED:.status.stoppedAt,ERROR:.status.error' \
         > "$CDIR/cluster_info/backups_summary.txt" 2>/dev/null || true
 
     # ScheduledBackups and their controller Jobs - a stuck ScheduledBackup

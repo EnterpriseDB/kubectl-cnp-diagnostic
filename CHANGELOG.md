@@ -20,7 +20,26 @@ the README's "Checking for Updates & Upgrading" section for how to update.
 ## [Unreleased]
 
 Nothing pending yet — this section fills in as changes are made after
-1.1.0.
+1.1.1.
+
+## [1.1.1] - 2026-09-21
+
+- Fixed: `backups_summary.txt` (`cluster_info/`) was always an empty file.
+  It came from `kubectl cnp`/`kubectl cnpg get backups <cluster>`, which is
+  not a real subcommand of either plugin — confirmed directly against a
+  live cluster: `Error: unknown command "get" for "kubectl cnp"`. The
+  error was being silently swallowed by `2>/dev/null || true`, so this had
+  been broken since the line was first written, not a regression. Now
+  built from the `Backup` CRs directly (`kubectl get backup -o
+  custom-columns=...`), which needs no plugin and works identically on
+  CNP, CNPG, and PGD4K. Reported by Alexey Shishkin, who noticed it was
+  empty even with completed backups showing in `backups.yaml`.
+- Fixed: `backups.yaml` collected every `Backup` in the namespace
+  unfiltered, mixing different clusters' backups together whenever more
+  than one cluster shares a namespace. Both `backups.yaml` and
+  `backups_summary.txt` are now scoped to the current cluster via the
+  label the operator itself sets on the `Backup` CR (`cnpg.io/cluster` on
+  community CNPG, `k8s.enterprisedb.io/cluster` on CNP/PGD4K).
 
 ## [1.1.0] - 2026-09-16
 
