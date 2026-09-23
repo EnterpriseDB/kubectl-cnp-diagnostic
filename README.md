@@ -220,7 +220,7 @@ SHA-256, so you can confirm your installed copy is byte-for-byte the latest
 fix on `main`:
 ```
 $ kubectl edbdiag version
-kubectl-edbdiag version 1.1.1 (released 2026-09-21)
+kubectl-edbdiag version 1.2.0 (released 2026-09-23)
 SHA256:  <64-character hash of your local copy>
 Compare against: https://raw.githubusercontent.com/EnterpriseDB/kubectl-cnp-diagnostic/main/kubectl-edbdiag
 ```
@@ -425,6 +425,7 @@ The tool organizes results by cluster, pod, and database for easy troubleshootin
 │           │
 │           └── postgresql-advanced-cluster-4
 │
+├── edbdiag_version.txt
 ├── operator_info
 │   ├── barman_plugin_version.txt
 │   ├── clusterrolebindings.yaml
@@ -459,7 +460,7 @@ The tool organizes results by cluster, pod, and database for easy troubleshootin
 └── storage
     └── all_pv_list.txt
 
-24 directories, 174 files
+24 directories, 175 files
 ```
 
 ### PGD4K
@@ -553,6 +554,7 @@ Same per-pod/per-database layout as above, repeated for **every node-cluster** i
 │   ├── default__region-x-x        (same layout as region-a-1 above, repeated
 :                                    for every node-cluster in the group)
 :
+├── edbdiag_version.txt
 ├── operator_info
 │   ├── clusterrolebindings.yaml
 │   ├── logs
@@ -618,5 +620,5 @@ Same per-pod/per-database layout as above, repeated for **every node-cluster** i
 └── storage
     └── all_pv_list.txt
 
-58 directories, 448 files
+58 directories, 449 files
 ```

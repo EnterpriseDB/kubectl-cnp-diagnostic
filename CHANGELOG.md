@@ -20,7 +20,19 @@ the README's "Checking for Updates & Upgrading" section for how to update.
 ## [Unreleased]
 
 Nothing pending yet — this section fills in as changes are made after
-1.1.1.
+1.2.0.
+
+## [1.2.0] - 2026-09-23
+
+- Added: a new `edbdiag_version.txt` file at the root of every collected
+  bundle (alongside `clusters/`, `operator_info/`, `pgd_group_info/`,
+  `pods-logs/`, and `storage/`). It contains the same output as `kubectl
+  edbdiag version` (version + the script's own SHA-256), plus the
+  collection timestamp (UTC), the operator variant (CNP/CNPG/PGD4K), and
+  whether `kubectl` or `oc` was used. Previously there was no way to tell
+  which version of the tool produced a given report short of asking
+  whoever ran it. Suggested by Alexey Shishkin, who ran into exactly this
+  problem with a report received from NESO.
 
 ## [1.1.1] - 2026-09-21
 

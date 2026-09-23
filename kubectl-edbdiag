@@ -20,8 +20,8 @@ set -uo pipefail
 # anyone can diff their copy against main byte-for-byte without guessing
 # whether they're on the latest fix.
 # ------------------------------------------------------------
-EDBDIAG_VERSION="1.1.1"
-EDBDIAG_RELEASED="2026-09-21"
+EDBDIAG_VERSION="1.2.0"
+EDBDIAG_RELEASED="2026-09-23"
 
 print_version() {
     local self_sha=""
@@ -563,6 +563,20 @@ done
 echo "Starting comprehensive collection into: ${MAIN_DIR}"
 echo "  (all pod logs are also mirrored flat into: ${PODLOGS_DIR})"
 echo ""
+
+# ------------------------------------------------------------
+# 3b. VERSION STAMP (bundle root) - so any report can be tied back to the
+# exact kubectl-edbdiag build that produced it without having to ask
+# whoever ran it. Suggested by Alexey Shishkin after receiving a report
+# with no way to tell which version generated it.
+# ------------------------------------------------------------
+{
+    print_version
+    echo ""
+    echo "Collected:  $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+    echo "Variant:    ${VARIANT_LABEL}"
+    echo "CLI used:   ${KCMD}"
+} > "$MAIN_DIR/edbdiag_version.txt"
 
 # ------------------------------------------------------------
 # 4. OPERATOR DISCOVERY & VERSIONING (cluster-wide, run once)
