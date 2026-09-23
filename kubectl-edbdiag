@@ -252,6 +252,60 @@ save_all_pod_logs() {
     done
 }
 
+# Equivalent to `kubectl cnp status`/`kubectl cnpg status`, built entirely
+# from the Cluster CR's `.status` subresource + a pod list - no plugin
+# required. Used when PLUGIN_AVAILABLE=false (detected once, below) so
+# cluster_status.txt is never just an empty file on a machine that hasn't
+# installed the plugin. Relies on $KCMD, $CLUSTER_RES, $BACKUP_CLUSTER_LABEL,
+# and $OP_CMD, all set by variant-selection before this is ever called.
+#   build_fallback_cluster_status <namespace> <cluster>
+build_fallback_cluster_status() {
+    local ns="$1" cluster="$2"
+    local phase phaseReason instances readyInstances currentPrimary targetPrimary
+    local image systemID timelineID writeService readService
+
+    phase=$("$KCMD" get "$CLUSTER_RES" "$cluster" -n "$ns" -o jsonpath='{.status.phase}' 2>/dev/null)
+    phaseReason=$("$KCMD" get "$CLUSTER_RES" "$cluster" -n "$ns" -o jsonpath='{.status.phaseReason}' 2>/dev/null)
+    instances=$("$KCMD" get "$CLUSTER_RES" "$cluster" -n "$ns" -o jsonpath='{.status.instances}' 2>/dev/null)
+    readyInstances=$("$KCMD" get "$CLUSTER_RES" "$cluster" -n "$ns" -o jsonpath='{.status.readyInstances}' 2>/dev/null)
+    currentPrimary=$("$KCMD" get "$CLUSTER_RES" "$cluster" -n "$ns" -o jsonpath='{.status.currentPrimary}' 2>/dev/null)
+    targetPrimary=$("$KCMD" get "$CLUSTER_RES" "$cluster" -n "$ns" -o jsonpath='{.status.targetPrimary}' 2>/dev/null)
+    image=$("$KCMD" get "$CLUSTER_RES" "$cluster" -n "$ns" -o jsonpath='{.status.image}' 2>/dev/null)
+    systemID=$("$KCMD" get "$CLUSTER_RES" "$cluster" -n "$ns" -o jsonpath='{.status.systemID}' 2>/dev/null)
+    timelineID=$("$KCMD" get "$CLUSTER_RES" "$cluster" -n "$ns" -o jsonpath='{.status.timelineID}' 2>/dev/null)
+    writeService=$("$KCMD" get "$CLUSTER_RES" "$cluster" -n "$ns" -o jsonpath='{.status.writeService}' 2>/dev/null)
+    readService=$("$KCMD" get "$CLUSTER_RES" "$cluster" -n "$ns" -o jsonpath='{.status.readService}' 2>/dev/null)
+
+    echo "# FALLBACK cluster status - the '${OP_CMD}' kubectl plugin was not found on the"
+    echo "# machine that ran this collection, so this was built directly from the Cluster CR"
+    echo "# and pod list instead of 'kubectl ${OP_CMD} status'. Install the plugin for the"
+    echo "# richer per-instance LSN/replication-lag table."
+    echo ""
+    echo "Cluster Summary"
+    echo "Name:              ${ns}/${cluster}"
+    echo "System ID:         ${systemID:-<unknown>}"
+    echo "PostgreSQL Image:  ${image:-<unknown>}"
+    echo "Current Primary:   ${currentPrimary:-<unknown>}"
+    echo "Target Primary:    ${targetPrimary:-<unknown>}"
+    echo "Phase:             ${phase:-<unknown>}${phaseReason:+ (${phaseReason})}"
+    echo "Instances:         ${instances:-<unknown>}"
+    echo "Ready instances:   ${readyInstances:-<unknown>}"
+    echo "Timeline ID:       ${timelineID:-<unknown>}"
+    echo "Write service:     ${writeService:-<unknown>}"
+    echo "Read service:      ${readService:-<unknown>}"
+    echo ""
+    echo "Certificate expirations"
+    "$KCMD" get "$CLUSTER_RES" "$cluster" -n "$ns" \
+        -o jsonpath='{range $k, $v := .status.certificates.expirations}{$k}{": "}{$v}{"\n"}{end}' 2>/dev/null
+    echo ""
+    echo "Instances (from pod labels only - no live LSN/replication-lag data without the"
+    echo "plugin; see each pod's postgresql/replication_slots.out and .../replication.out"
+    echo "for that)"
+    "$KCMD" get pods -n "$ns" -l "${BACKUP_CLUSTER_LABEL}=${cluster}" \
+        -o custom-columns='NAME:.metadata.name,ROLE:.metadata.labels.role,READY:.status.containerStatuses[0].ready,PHASE:.status.phase,NODE:.spec.nodeName' \
+        2>/dev/null
+}
+
 # Different `pgd` CLI builds have used different subcommand spellings for
 # the same information (e.g. noun+verb "nodes list"/"cluster verify" on some
 # builds, "nodes show"/"verify-cluster" on others, and legacy flat
@@ -363,6 +417,28 @@ else
     # directly against real Backup CRs on both a CNP cluster and a PGD4K
     # cluster.
     BACKUP_CLUSTER_LABEL="k8s.enterprisedb.io/cluster"
+fi
+
+# Detect ONCE whether the kubectl-cnp/kubectl-cnpg plugin binary is actually
+# installed on this machine, rather than per-cluster (plugin presence is a
+# property of this machine's PATH, not of any individual cluster). When it's
+# missing, `kubectl cnp status`/`kubectl cnpg status` fails with kubectl's
+# own error for an unrecognized plugin verb - confirmed directly:
+# `error: unknown command "cnp" for "kubectl"`. The old
+# `2>/dev/null || true` on that call was silently swallowing that error into
+# an empty cluster_status.txt, indistinguishable from a real collection
+# failure - the same class of bug already fixed for backups_summary.txt.
+# Fall back to build_fallback_cluster_status() (defined above) instead of
+# leaving the file empty.
+PLUGIN_AVAILABLE=true
+PLUGIN_PROBE=$("$KCMD" "$OP_CMD" status --help 2>&1)
+if echo "$PLUGIN_PROBE" | grep -qE "unknown command \"${OP_CMD}\" for "; then
+    PLUGIN_AVAILABLE=false
+    echo "WARNING: '${OP_CMD}' kubectl plugin not found on this machine - cluster_status.txt"
+    echo "         will be built from the raw Cluster CR + pod list instead of"
+    echo "         'kubectl ${OP_CMD} status'. Install the plugin for the richer"
+    echo "         per-instance LSN/replication-lag view."
+    echo ""
 fi
 
 echo ""
@@ -676,8 +752,21 @@ collect_cluster() {
     "$KCMD" get "$CLUSTER_RES" "$CLUSTER_NAME" -n "$NAMESPACE" -o yaml \
         > "$CDIR/cluster_info/cluster_definition_full.yaml" 2>/dev/null || true
 
-    "$KCMD" "$OP_CMD" status "$CLUSTER_NAME" -n "$NAMESPACE" \
-        > "$CDIR/cluster_info/cluster_status.txt" 2>/dev/null || true
+    # Uses PLUGIN_AVAILABLE (detected once, above, from the real
+    # "unknown command" error kubectl gives for a missing plugin verb) to
+    # fall back to build_fallback_cluster_status() instead of leaving this
+    # file empty. When the plugin IS present, stderr is now kept (2>&1)
+    # rather than discarded, so a genuine failure (RBAC, unreachable
+    # cluster, etc.) shows up here too instead of silently producing an
+    # empty file - the same class of bug already fixed for
+    # backups_summary.txt.
+    if [ "$PLUGIN_AVAILABLE" = true ]; then
+        "$KCMD" "$OP_CMD" status "$CLUSTER_NAME" -n "$NAMESPACE" \
+            > "$CDIR/cluster_info/cluster_status.txt" 2>&1 || true
+    else
+        build_fallback_cluster_status "$NAMESPACE" "$CLUSTER_NAME" \
+            > "$CDIR/cluster_info/cluster_status.txt" 2>/dev/null || true
+    fi
 
     "$KCMD" describe "$CLUSTER_RES" "$CLUSTER_NAME" -n "$NAMESPACE" \
         > "$CDIR/cluster_info/cluster_describe.txt" 2>/dev/null || true

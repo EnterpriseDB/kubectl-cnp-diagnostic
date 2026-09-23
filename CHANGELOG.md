@@ -32,6 +32,18 @@ Nothing pending yet — this section fills in as changes are made after
   whether `kubectl` or `oc` was used. Previously there was no way to tell
   which version of the tool produced a given report short of asking
   whoever ran it.
+- Added: `cluster_info/cluster_status.txt` no longer ends up empty when the
+  `kubectl-cnp`/`kubectl-cnpg` plugin isn't installed on the machine
+  running the collection. That case is now detected directly from
+  kubectl's own error for an unrecognized plugin verb, and instead of
+  leaving the file empty, an equivalent status report (phase, instance
+  counts, current/target primary, certificate expirations, and a
+  per-instance table from pod labels) is built straight from the Cluster
+  CR and pod list, which needs no plugin at all. Also: when the plugin
+  IS installed but the status call fails for some other real reason
+  (RBAC, unreachable cluster, etc.), that error is now kept in the file
+  instead of being silently discarded — the same class of bug already
+  fixed for `backups_summary.txt` in 1.1.1.
 
 ## [1.1.1] - 2026-09-21
 

@@ -174,7 +174,7 @@ The tool generates a comprehensive `.tar.gz` package including:
 * **Collection Scope**:
     * CNP/CNPG — collect every cluster across every namespace, or a single named cluster.
     * PGD4K — since a PGD group is made up of multiple per-node `Cluster` resources (often across namespaces), the tool auto-discovers all of them and lets you collect the whole group, one namespace, or a single node.
-* **Cluster Level**: Status, full/cleaned YAML manifests, `describe` output, namespace events, ScheduledBackups, Jobs, PGDGroupCleanups, PVCs, Secrets (names/types only — never contents), and the Namespace definition (captures OpenShift SCC/UID-range annotations).
+* **Cluster Level**: Status, full/cleaned YAML manifests, `describe` output, namespace events, ScheduledBackups, Jobs, PGDGroupCleanups, PVCs, Secrets (names/types only — never contents), and the Namespace definition (captures OpenShift SCC/UID-range annotations). If the `kubectl-cnp`/`kubectl-cnpg` plugin isn't installed on the machine running the collection, `cluster_status.txt` is automatically built from the Cluster CR + pod list instead of the plugin's own `status` output, so it's never just an empty file.
 * **Operator Level**: Version tags, deployment manifests, controller logs, and RBAC (operator ClusterRole, OLM-owned ClusterRoles, ClusterRoleBindings).
 * **Pod Level**: `describe` output, OpenShift SCC/security-context annotation, and logs for **every container and init container** on the pod (not just `postgres`).
 * **`pods-logs/`**: every pod's logs (data nodes, operator, and — on PGD4K — proxy pods) are also mirrored flat into one top-level folder as `<namespace>__<pod>__<container>.log`, so you can grep across the whole run without walking the nested tree.
