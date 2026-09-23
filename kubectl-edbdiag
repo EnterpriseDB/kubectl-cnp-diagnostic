@@ -294,9 +294,24 @@ build_fallback_cluster_status() {
     echo "Write service:     ${writeService:-<unknown>}"
     echo "Read service:      ${readService:-<unknown>}"
     echo ""
+    # kubectl's jsonpath dialect does NOT support the two-variable
+    # `range $k, $v := <map>` syntax - confirmed directly against a live
+    # cluster: `error: error parsing jsonpath ... unrecognized character in
+    # action: U+002C ','`. That error was being silently swallowed by
+    # `2>/dev/null`, leaving this section blank on every real run - the
+    # same class of bug this whole fallback exists to fix elsewhere.
+    # `.status.certificates.expirations` as a bare jsonpath target instead
+    # renders correctly as one JSON object (kubectl's default map
+    # rendering); reformat it to one "name: expiry" line per cert with
+    # plain sed instead of pulling in a jq dependency this script doesn't
+    # otherwise need.
     echo "Certificate expirations"
-    "$KCMD" get "$CLUSTER_RES" "$cluster" -n "$ns" \
-        -o jsonpath='{range $k, $v := .status.certificates.expirations}{$k}{": "}{$v}{"\n"}{end}' 2>/dev/null
+    CERT_JSON=$("$KCMD" get "$CLUSTER_RES" "$cluster" -n "$ns" \
+        -o jsonpath='{.status.certificates.expirations}' 2>/dev/null)
+    if [ -n "$CERT_JSON" ] && [ "$CERT_JSON" != "{}" ]; then
+        echo "$CERT_JSON" | sed -e 's/^{//' -e 's/}$//' -e 's/","/"\n"/g' | \
+            sed -e 's/^"//' -e 's/"$//' -e 's/":"/: /'
+    fi
     echo ""
     echo "Instances (from pod labels only - no live LSN/replication-lag data without the"
     echo "plugin; see each pod's postgresql/replication_slots.out and .../replication.out"

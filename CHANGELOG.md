@@ -44,6 +44,13 @@ Nothing pending yet — this section fills in as changes are made after
   (RBAC, unreachable cluster, etc.), that error is now kept in the file
   instead of being silently discarded — the same class of bug already
   fixed for `backups_summary.txt` in 1.1.1.
+- Fixed: the fallback status report's "Certificate expirations" section
+  was always blank. kubectl's jsonpath dialect does not support the
+  two-variable `range $k, $v := <map>` syntax used to print it — confirmed
+  directly: `error: error parsing jsonpath ... unrecognized character in
+  action: U+002C ','`. That error was, again, being silently swallowed.
+  Certificate names/expiry dates are now read from the same field's plain
+  JSON rendering instead.
 
 ## [1.1.1] - 2026-09-21
 
