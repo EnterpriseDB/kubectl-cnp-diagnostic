@@ -28,10 +28,11 @@ Nothing pending yet — this section fills in as changes are made after
   bundle (alongside `clusters/`, `operator_info/`, `pgd_group_info/`,
   `pods-logs/`, and `storage/`). It contains the same output as `kubectl
   edbdiag version` (version + the script's own SHA-256), plus the
-  collection timestamp (UTC), the operator variant (CNP/CNPG/PGD4K), and
-  whether `kubectl` or `oc` was used. Previously there was no way to tell
-  which version of the tool produced a given report short of asking
-  whoever ran it.
+  collection timestamp (UTC), the operator variant (EDB Postgres® AI for
+  CloudNativePG™ / CloudNativePG™ / EDB Postgres® AI for CloudNativePG™
+  Global Cluster), and whether `kubectl` or `oc` was used. Previously
+  there was no way to tell which version of the tool produced a given
+  report short of asking whoever ran it.
 - Added: `cluster_info/cluster_status.txt` no longer ends up empty when the
   `kubectl-cnp`/`kubectl-cnpg` plugin isn't installed on the machine
   running the collection. That case is now detected directly from
@@ -62,14 +63,17 @@ Nothing pending yet — this section fills in as changes are made after
   been broken since the line was first written, not a regression. Now
   built from the `Backup` CRs directly (`kubectl get backup -o
   custom-columns=...`), which needs no plugin and works identically on
-  CNP, CNPG, and PGD4K. Noticed because the file was empty even though
-  completed backups were listed in `backups.yaml`.
+  EDB Postgres® AI for CloudNativePG™, CloudNativePG™, and EDB Postgres®
+  AI for CloudNativePG™ Global Cluster. Noticed because the file was
+  empty even though completed backups were listed in `backups.yaml`.
 - Fixed: `backups.yaml` collected every `Backup` in the namespace
   unfiltered, mixing different clusters' backups together whenever more
   than one cluster shares a namespace. Both `backups.yaml` and
   `backups_summary.txt` are now scoped to the current cluster via the
   label the operator itself sets on the `Backup` CR (`cnpg.io/cluster` on
-  community CNPG, `k8s.enterprisedb.io/cluster` on CNP/PGD4K).
+  community CloudNativePG™, `k8s.enterprisedb.io/cluster` on EDB
+  Postgres® AI for CloudNativePG™ / EDB Postgres® AI for CloudNativePG™
+  Global Cluster).
 
 ## [1.1.0] - 2026-09-16
 
@@ -85,18 +89,20 @@ you're picking up both sets of changes at once.
   StatefulSet's actual operator-set label
   (`k8s.pgd.enterprisedb.io/workloadType=pgd-proxy`), which only ever
   matches genuine PGD Proxy pods.
-- Added: PGD4K per-pod collection now dumps the entire `bdr` schema catalog
-  (every table + view, ~127 files on PGD 5.9.4 / ~128 on 6.x) into a new
+- Added: EDB Postgres® AI for CloudNativePG™ Global Cluster per-pod
+  collection now dumps the entire `bdr` schema catalog (every table +
+  view, ~127 files on PGD 5.9.4 / ~128 on 6.x) into a new
   `postgresql/bdr_catalog/` folder, instead of only the curated subset of
   `bdr.*` views collected by hand before. This is schema-discovery at
   runtime rather than a hand-maintained list, so it automatically adapts to
   whatever PGD version is installed and keeps pace with future PGD releases
   without going stale. Brings collection breadth in line with EDB's
   internal "Lasso" diagnostic tool.
-- Changed: PGD4K's scope-selection prompt now uses numbered options
-  (`1`/`2`/`3`/`q`) instead of letters (`a`/`n`/`m`/`q`), matching the
-  numbered style already used by the CNP/CNPG scope menu and the top-level
-  variant-selection menu.
+- Changed: the EDB Postgres® AI for CloudNativePG™ Global Cluster
+  scope-selection prompt now uses numbered options (`1`/`2`/`3`/`q`)
+  instead of letters (`a`/`n`/`m`/`q`), matching the numbered style
+  already used by the EDB Postgres® AI for CloudNativePG™/CloudNativePG™
+  scope menu and the top-level variant-selection menu.
 
 ## [1.0.1] - 2026-09-16
 
