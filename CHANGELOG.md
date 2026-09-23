@@ -31,8 +31,7 @@ Nothing pending yet — this section fills in as changes are made after
   collection timestamp (UTC), the operator variant (CNP/CNPG/PGD4K), and
   whether `kubectl` or `oc` was used. Previously there was no way to tell
   which version of the tool produced a given report short of asking
-  whoever ran it. Suggested by Alexey Shishkin, who ran into exactly this
-  problem with a report received from NESO.
+  whoever ran it.
 
 ## [1.1.1] - 2026-09-21
 
@@ -44,8 +43,8 @@ Nothing pending yet — this section fills in as changes are made after
   been broken since the line was first written, not a regression. Now
   built from the `Backup` CRs directly (`kubectl get backup -o
   custom-columns=...`), which needs no plugin and works identically on
-  CNP, CNPG, and PGD4K. Reported by Alexey Shishkin, who noticed it was
-  empty even with completed backups showing in `backups.yaml`.
+  CNP, CNPG, and PGD4K. Noticed because the file was empty even though
+  completed backups were listed in `backups.yaml`.
 - Fixed: `backups.yaml` collected every `Backup` in the namespace
   unfiltered, mixing different clusters' backups together whenever more
   than one cluster shares a namespace. Both `backups.yaml` and
@@ -66,7 +65,7 @@ you're picking up both sets of changes at once.
   component completely unrelated to PGD. Now uses the PGD Proxy
   StatefulSet's actual operator-set label
   (`k8s.pgd.enterprisedb.io/workloadType=pgd-proxy`), which only ever
-  matches genuine PGD Proxy pods. Reported by Alexey Shishkin.
+  matches genuine PGD Proxy pods.
 - Added: PGD4K per-pod collection now dumps the entire `bdr` schema catalog
   (every table + view, ~127 files on PGD 5.9.4 / ~128 on 6.x) into a new
   `postgresql/bdr_catalog/` folder, instead of only the curated subset of
@@ -74,11 +73,11 @@ you're picking up both sets of changes at once.
   runtime rather than a hand-maintained list, so it automatically adapts to
   whatever PGD version is installed and keeps pace with future PGD releases
   without going stale. Brings collection breadth in line with EDB's
-  internal "Lasso" diagnostic tool. Suggested by Alexey Shishkin.
+  internal "Lasso" diagnostic tool.
 - Changed: PGD4K's scope-selection prompt now uses numbered options
   (`1`/`2`/`3`/`q`) instead of letters (`a`/`n`/`m`/`q`), matching the
   numbered style already used by the CNP/CNPG scope menu and the top-level
-  variant-selection menu. Suggested by Alexey Shishkin.
+  variant-selection menu.
 
 ## [1.0.1] - 2026-09-16
 
