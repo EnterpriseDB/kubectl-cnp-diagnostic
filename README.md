@@ -38,9 +38,10 @@ If this errors out or times out after 30 seconds (some corporate
 SSL-inspecting proxies silently block `raw.githubusercontent.com`), clone
 the repo instead and copy the file out of it:
 ```
-git clone --depth 1 https://github.com/EnterpriseDB/kubectl-cnp-diagnostic.git
-cp kubectl-cnp-diagnostic/kubectl-edbdiag .
-chmod +x kubectl-edbdiag
+1] git clone --depth 1 https://github.com/EnterpriseDB/kubectl-cnp-diagnostic.git
+2] cp kubectl-cnp-diagnostic/kubectl-edbdiag .
+3] chmod +x kubectl-edbdiag
+4] ./kubectl-edbdiag 
 ```
 
 Optionally confirm what you're about to transfer is genuinely current
