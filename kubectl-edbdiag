@@ -11,7 +11,7 @@
 set -uo pipefail
 
 # ------------------------------------------------------------
-# VERSION - bump EDBDIAG_VERSION/EDBDIAG_RELEASED by hand with every
+# VERSION  bump EDBDIAG_VERSION/EDBDIAG_RELEASED by hand with every
 # meaningful change pushed to main. Unlike the `kubectl cnpg`/`kubectl cnp`
 # plugins (compiled Go binaries with build-time-injected Version/Commit/Date),
 # this is a plain shell script fetched straight from GitHub, so there is no
