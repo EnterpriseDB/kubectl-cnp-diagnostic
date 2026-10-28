@@ -2,9 +2,9 @@
 # ============================================================
 #  EDB / Postgres Cluster Diagnostic Collector (kubectl-edbdiag)
 #  Supports:
-#    1) CNP   - EDB Postgres for Kubernetes
-#    2) CNPG  - CloudNativePG (community)
-#    3) PGD4K - EDB Postgres Distributed for Kubernetes
+#    1) CNP(PG4K): EDB Postgres® AI for CloudNativePG™ Cluster
+#    2) CNPG: CloudNativePG™ (community)
+#    3) PGD4K: EDB Postgres® AI for CloudNativePG™ Global Cluster
 #  Works against plain Kubernetes (kubectl) or OpenShift (oc) - auto-detected.
 # ============================================================
 
@@ -20,8 +20,8 @@ set -uo pipefail
 # anyone can diff their copy against main byte-for-byte without guessing
 # whether they're on the latest fix.
 # ------------------------------------------------------------
-EDBDIAG_VERSION="1.2.0"
-EDBDIAG_RELEASED="2026-09-23"
+EDBDIAG_VERSION="1.3.0"
+EDBDIAG_RELEASED="2026-10-28"
 
 print_version() {
     local self_sha=""
@@ -50,6 +50,7 @@ PRESET_VARIANT=""
 PRESET_SCOPE=""
 PRESET_NAMESPACE=""
 PRESET_CLUSTER=""
+PRESET_OPERATOR_NAMESPACE=""
 NONINTERACTIVE=false
 
 print_usage() {
@@ -67,6 +68,13 @@ or supply all of them for a fully unattended run.
                                     single    - exactly --namespace + --cluster
   --namespace=NAME                Required for scope=namespace or scope=single
   --cluster=NAME                  Required for scope=single
+  --operator-namespace=NAME       Skip the cluster-wide operator pod search
+                                   and look directly in this namespace instead.
+                                   Use this under RBAC-segregated access (no
+                                   cluster-scoped pod-list permission) where
+                                   the account can only read specific
+                                   namespaces - operator-level diagnostics
+                                   would otherwise be silently skipped.
   -y, --yes, --non-interactive    Fail fast instead of prompting if
                                    --variant or --scope wasn't also given
   version, -v, --version          Print the script version + its own
@@ -99,6 +107,8 @@ while [ $# -gt 0 ]; do
         --namespace)   PRESET_NAMESPACE="${2:-}"; shift ;;
         --cluster=*)   PRESET_CLUSTER="${1#*=}" ;;
         --cluster)     PRESET_CLUSTER="${2:-}"; shift ;;
+        --operator-namespace=*) PRESET_OPERATOR_NAMESPACE="${1#*=}" ;;
+        --operator-namespace)   PRESET_OPERATOR_NAMESPACE="${2:-}"; shift ;;
         -y|--yes|--non-interactive) NONINTERACTIVE=true ;;
         -v|--version|version) print_version; exit 0 ;;
         -h|--help) print_usage; exit 0 ;;
@@ -170,9 +180,39 @@ fi
 # doesn't stop the script; it just makes every subsequent command fail
 # silently, and the script still "succeeds", producing a full-looking but
 # entirely empty diagnostic bundle instead of a clear error up front.
-if ! "$KCMD" cluster-info &>/dev/null; then
+#
+# This used to call `cluster-info`, but that command itself requires
+# `get`/`list` on `services` in `kube-system` to succeed - a permission
+# regulated/RBAC-segregated environments deliberately withhold from
+# application/DB-team accounts, even when those accounts have full read
+# access to their own target namespace and to the operator's namespace
+# (confirmed directly against a real customer's `kubectl auth can-i --list`
+# output: broad `get/list/watch` on pods, services, and every
+# postgresql.cnpg.io CRD in their own namespaces, but nothing at all in
+# kube-system). That made the tool entirely unusable there, despite the
+# account having everything it actually needed for a real collection.
+# `/livez` is a pure liveness/reachability probe with no resource-level
+# RBAC requirement - the same customer's permission dump shows `get` on
+# `/livez`, `/healthz`, `/readyz`, and `/version` with no namespace scoping
+# at all, which is typical: these non-resource URLs are generally reachable
+# by any authenticated identity. It proves the exact same thing
+# `cluster-info` was being used for here (API server reachable, current
+# context's credentials valid) without requiring any privilege beyond what
+# practically every authenticated user already has.
+#
+# Deliberately no `--request-timeout` flag here: on at least one real
+# in-cluster kubectl client (v1.30.0), adding `--request-timeout` to ANY
+# command - not just this one - makes kubectl skip its normal in-cluster/
+# kubeconfig server auto-detection and fall back to the compiled-in default
+# of localhost:8080, failing with "connection refused" even though the same
+# command with no timeout flag succeeds immediately. Reproduced directly:
+# `kubectl get pods --request-timeout=5s` and `kubectl get --raw=/livez
+# --request-timeout=5s` both fail that way, while `kubectl get --raw=/livez`
+# (no timeout flag) succeeds every time. Matches the original cluster-info
+# check, which also never set an explicit timeout.
+if ! "$KCMD" get --raw='/livez' &>/dev/null; then
     echo "ERROR: Cannot reach a Kubernetes API server with the current context." >&2
-    echo "       Check 'kubectl config current-context' and 'kubectl cluster-info',"  >&2
+    echo "       Check 'kubectl config current-context' and 'kubectl get --raw=/livez',"  >&2
     echo "       fix/point your kubeconfig at the right cluster, then re-run." >&2
     exit 1
 fi
@@ -672,14 +712,74 @@ echo ""
 # ------------------------------------------------------------
 # 4. OPERATOR DISCOVERY & VERSIONING (cluster-wide, run once)
 # ------------------------------------------------------------
+# `kubectl get pods -A` (all-namespaces) requires a CLUSTER-scoped pod-list
+# permission. Under RBAC-segregated access (namespace-scoped RoleBindings
+# only, e.g. HSBC's model - broad read in their own + the operator's
+# namespace, nothing cluster-wide), that call fails outright with a
+# "...at the cluster scope" Forbidden error even when the exact pod being
+# searched for sits in a namespace the account CAN read fine. Confirmed
+# directly: the same label-selector query scoped with `-n <operator-ns>`
+# instead of `-A` succeeds immediately under that identity, while the `-A`
+# form is rejected before it even looks at individual pods. Without this,
+# operator-level diagnostics (version, manifest, RBAC, logs) were being
+# silently skipped for every RBAC-segregated account, not just ones that
+# genuinely have no operator pod to find.
+#
+# Fix: try likely/known namespaces with a SCOPED (`-n`) query first - this
+# needs only that one namespace's RBAC, exactly what a restricted account's
+# RoleBinding into the operator namespace already grants - and fall back to
+# the broad `-A` search only if none of those hit. This also means a
+# correctly-scoped account finds the operator pod *faster* (one cheap
+# namespaced call instead of a cluster-wide list), not just as a fallback.
 find_op_pod() {
-    "$KCMD" get pods -A -l "$1" --no-headers 2>/dev/null | head -n 1
+    local label="$1"
+    local ns
+    # --operator-namespace, if given, is checked first and is the only one
+    # tried if a value was supplied - the user already knows where it is.
+    if [ -n "$PRESET_OPERATOR_NAMESPACE" ]; then
+        "$KCMD" get pods -n "$PRESET_OPERATOR_NAMESPACE" -l "$label" --no-headers 2>/dev/null | \
+            awk -v ns="$PRESET_OPERATOR_NAMESPACE" '{print ns, $0; exit}'
+        return
+    fi
+    for ns in cnpg-system postgresql-operator-system postgres-operator-system \
+              pgd-system edb-postgres-ai openshift-operators "${NAMESPACE:-}"; do
+        [ -z "$ns" ] && continue
+        local hit
+        hit=$("$KCMD" get pods -n "$ns" -l "$label" --no-headers 2>/dev/null | head -n 1)
+        if [ -n "$hit" ]; then
+            awk -v ns="$ns" '{print ns, $0}' <<< "$hit"
+            return
+        fi
+    done
+    # Fall back to the cluster-wide search - works fine for the common case
+    # (broad/cluster-admin access), just not relied on as the only path.
+    "$KCMD" get pods -A -l "$label" --no-headers 2>/dev/null | head -n 1
 }
 find_op_pod_by_name() {
-    "$KCMD" get pods -A --no-headers 2>/dev/null | grep -i "$1" | head -n 1
+    local name="$1"
+    local ns
+    if [ -n "$PRESET_OPERATOR_NAMESPACE" ]; then
+        "$KCMD" get pods -n "$PRESET_OPERATOR_NAMESPACE" --no-headers 2>/dev/null | \
+            grep -i "$name" | awk -v ns="$PRESET_OPERATOR_NAMESPACE" '{print ns, $0; exit}'
+        return
+    fi
+    for ns in cnpg-system postgresql-operator-system postgres-operator-system \
+              pgd-system edb-postgres-ai openshift-operators "${NAMESPACE:-}"; do
+        [ -z "$ns" ] && continue
+        local hit
+        hit=$("$KCMD" get pods -n "$ns" --no-headers 2>/dev/null | grep -i "$name" | head -n 1)
+        if [ -n "$hit" ]; then
+            awk -v ns="$ns" '{print ns, $0}' <<< "$hit"
+            return
+        fi
+    done
+    "$KCMD" get pods -A --no-headers 2>/dev/null | grep -i "$name" | head -n 1
 }
 
 echo "Collecting operator-level info..."
+if [ -n "$PRESET_OPERATOR_NAMESPACE" ]; then
+    echo "  Using --operator-namespace=${PRESET_OPERATOR_NAMESPACE} for the operator pod search."
+fi
 
 OP_POD_INFO=""
 if [ "$IS_PGD" = true ]; then
@@ -699,10 +799,10 @@ if [ -n "$OP_POD_INFO" ]; then
 
     "$KCMD" get pod "$OP_POD_NAME" -n "$OP_NS" \
         -o jsonpath='{.spec.containers[0].image}' \
-        > "$MAIN_DIR/operator_info/operator_version.txt" 2>/dev/null || true
+        > "$MAIN_DIR/operator_info/operator_version.txt" 2>&1 || true
 
     "$KCMD" get deployment -n "$OP_NS" -o yaml \
-        > "$MAIN_DIR/operator_info/operator_manifest.yaml" 2>/dev/null || true
+        > "$MAIN_DIR/operator_info/operator_manifest.yaml" 2>&1 || true
 
     save_all_pod_logs "$OP_NS" "$OP_POD_NAME" "$MAIN_DIR/operator_info/logs"
 else
@@ -715,15 +815,15 @@ fi
 # initially looked like a pure PGD/BDR problem.
 if [ "$IS_PGD" = true ]; then
     "$KCMD" describe clusterrole pgd-operator-manager-role \
-        > "$MAIN_DIR/operator_info/operator_clusterrole.txt" 2>/dev/null || true
+        > "$MAIN_DIR/operator_info/operator_clusterrole.txt" 2>&1 || true
 else
     "$KCMD" describe clusterrole postgresql-operator-manager \
-        > "$MAIN_DIR/operator_info/operator_clusterrole.txt" 2>/dev/null || true
+        > "$MAIN_DIR/operator_info/operator_clusterrole.txt" 2>&1 || true
 fi
 "$KCMD" get clusterrole --selector=olm.owner.kind=ClusterServiceVersion -o yaml \
-    > "$MAIN_DIR/operator_info/olm_owned_clusterroles.yaml" 2>/dev/null || true
+    > "$MAIN_DIR/operator_info/olm_owned_clusterroles.yaml" 2>&1 || true
 "$KCMD" get clusterrolebinding -o yaml \
-    > "$MAIN_DIR/operator_info/clusterrolebindings.yaml" 2>/dev/null || true
+    > "$MAIN_DIR/operator_info/clusterrolebindings.yaml" 2>&1 || true
 
 BARMAN_POD_INFO=$(find_op_pod_by_name "barman-cloud")
 if [ -n "$BARMAN_POD_INFO" ]; then
@@ -731,10 +831,10 @@ if [ -n "$BARMAN_POD_INFO" ]; then
     B_NAME=$(awk '{print $2}' <<< "$BARMAN_POD_INFO")
     "$KCMD" get pod "$B_NAME" -n "$B_NS" \
         -o jsonpath='{.spec.containers[0].image}' \
-        > "$MAIN_DIR/operator_info/barman_plugin_version.txt" 2>/dev/null || true
+        > "$MAIN_DIR/operator_info/barman_plugin_version.txt" 2>&1 || true
 fi
 
-"$KCMD" get pv > "$MAIN_DIR/storage/all_pv_list.txt" 2>/dev/null || true
+"$KCMD" get pv > "$MAIN_DIR/storage/all_pv_list.txt" 2>&1 || true
 
 # ------------------------------------------------------------
 # 5. PER-CLUSTER / PER-POD / PER-DATABASE COLLECTION
@@ -765,7 +865,7 @@ collect_cluster() {
     fi
 
     "$KCMD" get "$CLUSTER_RES" "$CLUSTER_NAME" -n "$NAMESPACE" -o yaml \
-        > "$CDIR/cluster_info/cluster_definition_full.yaml" 2>/dev/null || true
+        > "$CDIR/cluster_info/cluster_definition_full.yaml" 2>&1 || true
 
     # Uses PLUGIN_AVAILABLE (detected once, above, from the real
     # "unknown command" error kubectl gives for a missing plugin verb) to
@@ -784,7 +884,7 @@ collect_cluster() {
     fi
 
     "$KCMD" describe "$CLUSTER_RES" "$CLUSTER_NAME" -n "$NAMESPACE" \
-        > "$CDIR/cluster_info/cluster_describe.txt" 2>/dev/null || true
+        > "$CDIR/cluster_info/cluster_describe.txt" 2>&1 || true
 
     # Scoped to THIS cluster via the label the operator itself puts on the
     # Backup CR (BACKUP_CLUSTER_LABEL, set above) - an earlier version
@@ -792,7 +892,7 @@ collect_cluster() {
     # different clusters' backups together whenever more than one cluster
     # shares a namespace.
     "$KCMD" get backup -n "$NAMESPACE" -l "${BACKUP_CLUSTER_LABEL}=${CLUSTER_NAME}" -o yaml \
-        > "$CDIR/cluster_info/backups.yaml" 2>/dev/null || true
+        > "$CDIR/cluster_info/backups.yaml" 2>&1 || true
 
     # `kubectl cnp`/`kubectl cnpg` has no "get" verb at all - the plugin only
     # exposes `backup <cluster>` to CREATE a new backup, never to list
@@ -807,38 +907,38 @@ collect_cluster() {
     # identically on CNP, CNPG, and PGD4K.
     "$KCMD" get backup -n "$NAMESPACE" -l "${BACKUP_CLUSTER_LABEL}=${CLUSTER_NAME}" \
         -o custom-columns='NAME:.metadata.name,PHASE:.status.phase,METHOD:.status.method,STARTED:.status.startedAt,STOPPED:.status.stoppedAt,ERROR:.status.error' \
-        > "$CDIR/cluster_info/backups_summary.txt" 2>/dev/null || true
+        > "$CDIR/cluster_info/backups_summary.txt" 2>&1 || true
 
     # ScheduledBackups and their controller Jobs - a stuck ScheduledBackup
     # (reconciliation loop, "already exists" errors on the target Backup
     # name) or a hung backup Job has been the root cause in real PGD4K cases.
     "$KCMD" get scheduledbackup -n "$NAMESPACE" -o yaml \
-        > "$CDIR/cluster_info/scheduledbackups.yaml" 2>/dev/null || true
+        > "$CDIR/cluster_info/scheduledbackups.yaml" 2>&1 || true
     "$KCMD" get jobs -n "$NAMESPACE" -o wide \
-        > "$CDIR/cluster_info/jobs.txt" 2>/dev/null || true
+        > "$CDIR/cluster_info/jobs.txt" 2>&1 || true
 
     # PGDGroupCleanup objects - completed/stuck cleanups are frequently
     # mistaken for (or actually are) the trigger behind a later outage.
     "$KCMD" get pgdgroupcleanups -n "$NAMESPACE" -o yaml \
-        > "$CDIR/cluster_info/pgdgroupcleanups.yaml" 2>/dev/null || true
+        > "$CDIR/cluster_info/pgdgroupcleanups.yaml" 2>&1 || true
 
     "$KCMD" get events -n "$NAMESPACE" --sort-by='.lastTimestamp' \
-        > "$CDIR/cluster_info/namespace_events.txt" 2>/dev/null || true
+        > "$CDIR/cluster_info/namespace_events.txt" 2>&1 || true
 
     "$KCMD" get pvc -n "$NAMESPACE" \
-        > "$CDIR/cluster_info/pvc_list.txt" 2>/dev/null || true
+        > "$CDIR/cluster_info/pvc_list.txt" 2>&1 || true
 
     # Secret *names/types* only (never contents) - to catch missing
     # image-pull secrets (FailedToRetrieveImagePullSecret) without touching
     # credential data.
     "$KCMD" get secrets -n "$NAMESPACE" \
-        > "$CDIR/cluster_info/secrets_list.txt" 2>/dev/null || true
+        > "$CDIR/cluster_info/secrets_list.txt" 2>&1 || true
 
     # Namespace definition - carries OpenShift SCC/UID-range annotations
     # (openshift.io/sa.scc.uid-range, supplemental-groups) that matter when
     # diagnosing "chmod ... operation not permitted" PGDATA ownership issues.
     "$KCMD" get namespace "$NAMESPACE" -o yaml \
-        > "$CDIR/cluster_info/namespace_definition.yaml" 2>/dev/null || true
+        > "$CDIR/cluster_info/namespace_definition.yaml" 2>&1 || true
 
     # ---- Pod discovery ----
     local PODS
@@ -861,14 +961,14 @@ collect_cluster() {
         mkdir -p "$POD_DIR/postgresql"
 
         "$KCMD" describe pod "$POD" -n "$NAMESPACE" \
-            > "$POD_DIR/describe_result.txt" 2>/dev/null || true
+            > "$POD_DIR/describe_result.txt" 2>&1 || true
 
         # OpenShift SCC + assigned UID (empty/no-op on vanilla Kubernetes) -
         # needed to confirm a pod's assigned UID against the PV's on-disk
         # PGDATA ownership when diagnosing "chmod: operation not permitted".
         "$KCMD" get pod "$POD" -n "$NAMESPACE" \
             -o jsonpath='{.metadata.annotations.openshift\.io/scc}{"\n"}{.spec.securityContext}{"\n"}' \
-            > "$POD_DIR/scc_and_security_context.txt" 2>/dev/null || true
+            > "$POD_DIR/scc_and_security_context.txt" 2>&1 || true
 
         # Logs for every container/init container on the pod - not just
         # "postgres" - so PGD4K sidecars aren't silently skipped. Saved both
@@ -1174,8 +1274,8 @@ if [ "$IS_PGD" = true ] && [ -n "$FIRST_PGD_POD_NAME" ]; then
             "$GDIR/pgd_check_health.out"  "check-health"
     fi
 
-    "$KCMD" get pgdgroups -A -o yaml > "$GDIR/pgdgroups.yaml" 2>/dev/null || true
-    "$KCMD" get pgdgroupcleanups -A -o yaml > "$GDIR/pgdgroupcleanups.yaml" 2>/dev/null || true
+    "$KCMD" get pgdgroups -A -o yaml > "$GDIR/pgdgroups.yaml" 2>&1 || true
+    "$KCMD" get pgdgroupcleanups -A -o yaml > "$GDIR/pgdgroupcleanups.yaml" 2>&1 || true
 
     # PGD Proxy is a separate component/Deployment from the data-node pods
     # collected in section 5 above - it needs its own describe+logs, not
@@ -1191,21 +1291,41 @@ if [ "$IS_PGD" = true ] && [ -n "$FIRST_PGD_POD_NAME" ]; then
     # (confirmed against a real PGD Proxy pod: k8s.pgd.enterprisedb.io/group=
     # <group>, k8s.pgd.enterprisedb.io/workloadType=pgd-proxy), which only
     # ever matches the real thing.
-    echo "  Collecting PGD Proxy pod diagnostics..."
-    mkdir -p "$GDIR/proxy_pods"
-    PROXY_PODS_RAW=$("$KCMD" get pods -A -l 'k8s.pgd.enterprisedb.io/workloadType=pgd-proxy' --no-headers 2>/dev/null)
-    if [ -n "$PROXY_PODS_RAW" ]; then
-        while IFS= read -r line; do
-            [ -z "${line// /}" ] && continue
-            P_NS=$(awk '{print $1}' <<< "$line")
-            P_NAME=$(awk '{print $2}' <<< "$line")
-            PDIR="$GDIR/proxy_pods/${P_NS}__${P_NAME}"
-            mkdir -p "$PDIR"
-            "$KCMD" describe pod "$P_NAME" -n "$P_NS" > "$PDIR/describe_result.txt" 2>/dev/null || true
-            save_all_pod_logs "$P_NS" "$P_NAME" "$PDIR"
-        done <<< "$PROXY_PODS_RAW"
+    # PGD Proxy was merged into core PGD routing as of PGD 6.x - it is no
+    # longer a separate deployable component at all on 6.x+, so searching
+    # for its pods there isn't "maybe not deployed", it's "doesn't exist in
+    # this version" (confirmed via GitHub issue #2: a real PGD 6.x + PGD4K
+    # 2.x customer reported the old "No PGD Proxy pods found" message as
+    # confusing - it read like something might be missing/misconfigured,
+    # when 6.x simply has no such component to find). Skip the search
+    # outright once 6.x+ is detected, same pattern as the check-health skip
+    # above, rather than running a query that can only ever report "not
+    # found" and wording that implies absence is unexpected.
+    if [ -n "$PGD_CLI_MAJOR" ] && [ "$PGD_CLI_MAJOR" -ge 6 ] 2>/dev/null; then
+        echo "  Skipping PGD Proxy pod collection - PGD Proxy was removed/merged into core PGD routing as of PGD 6.x (detected: ${PGD_CLI_MAJOR}.x); there is no separate PGD Proxy component to collect."
+        mkdir -p "$GDIR/proxy_pods"
+        {
+            echo "# Skipped: PGD Proxy is not a separate component in PGD ${PGD_CLI_MAJOR}.x and later."
+            echo "# Nothing to collect here by design - see pgd_cluster_show.out / pgd_raft_show.out"
+            echo "# for the connection-routing info that PGD Proxy used to provide separately."
+        } > "$GDIR/proxy_pods/README.txt"
     else
-        echo "  No PGD Proxy pods found (label k8s.pgd.enterprisedb.io/workloadType=pgd-proxy) - this PGD group may not have PGD Proxy deployed."
+        echo "  Collecting PGD Proxy pod diagnostics..."
+        mkdir -p "$GDIR/proxy_pods"
+        PROXY_PODS_RAW=$("$KCMD" get pods -A -l 'k8s.pgd.enterprisedb.io/workloadType=pgd-proxy' --no-headers 2>/dev/null)
+        if [ -n "$PROXY_PODS_RAW" ]; then
+            while IFS= read -r line; do
+                [ -z "${line// /}" ] && continue
+                P_NS=$(awk '{print $1}' <<< "$line")
+                P_NAME=$(awk '{print $2}' <<< "$line")
+                PDIR="$GDIR/proxy_pods/${P_NS}__${P_NAME}"
+                mkdir -p "$PDIR"
+                "$KCMD" describe pod "$P_NAME" -n "$P_NS" > "$PDIR/describe_result.txt" 2>&1 || true
+                save_all_pod_logs "$P_NS" "$P_NAME" "$PDIR"
+            done <<< "$PROXY_PODS_RAW"
+        else
+            echo "  No PGD Proxy pods found (label k8s.pgd.enterprisedb.io/workloadType=pgd-proxy) - this PGD group may not have PGD Proxy deployed."
+        fi
     fi
 fi
 
