@@ -20,7 +20,49 @@ the README's "Checking for Updates & Upgrading" section for how to update.
 ## [Unreleased]
 
 Nothing pending yet — this section fills in as changes are made after
-1.2.0.
+1.3.0.
+
+## [1.3.0] - 2026-10-28
+
+A handful of these came from real customers running into real walls with
+the tool, and it's worth saying plainly: the pattern across all of them is
+the same silent-failure problem — a command fails, the error gets thrown
+away, and you're left staring at an empty file with no idea why. That's
+now fixed in the specific spots below, and it changes how failures show up
+going forward: you'll see the actual error instead of nothing.
+
+- Fixed: the preflight check (`kubectl cluster-info`) needed `list
+  services` in `kube-system` just to confirm the API server was reachable.
+  That's a permission a lot of RBAC-locked-down environments won't hand to
+  application/DB-team accounts, even when those same accounts can read
+  everything they actually need — their own namespace and the operator's.
+  The tool refused to run at all in that situation, even though a real
+  collection would have worked fine. It now checks `kubectl get
+  --raw=/livez` instead — a plain liveness endpoint any authenticated user
+  can reach by default — which proves the same thing (server's up,
+  credentials are good) without needing any extra privilege. (#1)
+- Fixed: a related gap in operator-level collection (version, manifest,
+  RBAC, logs). The pod search behind it used `kubectl get pods -A`, which
+  needs a cluster-wide permission — so it failed even when the account
+  could read the operator's own namespace just fine, exactly the situation
+  above. It now tries a short list of common operator-namespace names with
+  a scoped query first, falling back to the old cluster-wide search only
+  if none of those hit.
+- Added: `--operator-namespace=NAME`, for anyone running under
+  RBAC-segregated access who already knows where their operator lives —
+  skips the namespace guesswork above entirely and goes straight there.
+- Fixed: on PGD 6.x, the tool went looking for PGD Proxy pods and printed
+  "No PGD Proxy pods found," which reads like something might be missing.
+  It isn't — PGD Proxy was folded into core PGD routing as of 6.x, so
+  there's nothing there to find. The check is now skipped outright on 6.x
+  and later, with a short note explaining why instead of a message that
+  sounds like a warning. (#2)
+- Fixed: several commands (`cluster_definition_full.yaml`,
+  `cluster_describe.txt`, `backups_summary.txt`, `operator_clusterrole.txt`,
+  and a few others) were discarding their error output on failure, so a
+  real problem looked identical to "nothing here." Those files now keep
+  the actual error instead, so a genuine failure is visible rather than a
+  mysteriously empty file.
 
 ## [1.2.0] - 2026-09-23
 
@@ -30,9 +72,10 @@ Nothing pending yet — this section fills in as changes are made after
   edbdiag version` (version + the script's own SHA-256), plus the
   collection timestamp (UTC), the operator variant (EDB Postgres® AI for
   CloudNativePG™ / CloudNativePG™ / EDB Postgres® AI for CloudNativePG™
-  Global Cluster), and whether `kubectl` or `oc` was used. Previously
-  there was no way to tell which version of the tool produced a given
-  report short of asking whoever ran it.
+  Global Cluster), and
+  whether `kubectl` or `oc` was used. Previously there was no way to tell
+  which version of the tool produced a given report short of asking
+  whoever ran it.
 - Added: `cluster_info/cluster_status.txt` no longer ends up empty when the
   `kubectl-cnp`/`kubectl-cnpg` plugin isn't installed on the machine
   running the collection. That case is now detected directly from
@@ -89,9 +132,8 @@ you're picking up both sets of changes at once.
   StatefulSet's actual operator-set label
   (`k8s.pgd.enterprisedb.io/workloadType=pgd-proxy`), which only ever
   matches genuine PGD Proxy pods.
-- Added: EDB Postgres® AI for CloudNativePG™ Global Cluster per-pod
-  collection now dumps the entire `bdr` schema catalog (every table +
-  view, ~127 files on PGD 5.9.4 / ~128 on 6.x) into a new
+- Added: EDB Postgres® AI for CloudNativePG™ Global Cluster per-pod collection now dumps the entire `bdr` schema catalog
+  (every table + view, ~127 files on PGD 5.9.4 / ~128 on 6.x) into a new
   `postgresql/bdr_catalog/` folder, instead of only the curated subset of
   `bdr.*` views collected by hand before. This is schema-discovery at
   runtime rather than a hand-maintained list, so it automatically adapts to
