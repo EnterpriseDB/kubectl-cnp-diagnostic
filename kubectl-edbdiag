@@ -20,8 +20,8 @@ set -uo pipefail
 # anyone can diff their copy against main byte-for-byte without guessing
 # whether they're on the latest fix.
 # ------------------------------------------------------------
-EDBDIAG_VERSION="1.3.0"
-EDBDIAG_RELEASED="2026-10-28"
+EDBDIAG_VERSION="1.3.1"
+EDBDIAG_RELEASED="2026-10-31"
 
 print_version() {
     local self_sha=""
@@ -508,6 +508,28 @@ TARGETS=()   # each entry: "namespace|clustername"
 collect_lines ALL_CLUSTERS_RAW <<< "$("$KCMD" get "$CLUSTER_RES" -A --no-headers \
     -o custom-columns="NS:.metadata.namespace,NAME:.metadata.name" 2>/dev/null)"
 
+# `-A` (all-namespaces) here requires a CLUSTER-scoped list permission on the
+# ${VARIANT_LABEL} Cluster CRD itself. Under RBAC-segregated access
+# (namespace-scoped RoleBindings only), that call returns nothing even when
+# the account can list clusters fine within its own namespace - confirmed
+# directly: `kubectl get <cluster-crd> -n <namespace>` succeeds and lists
+# every cluster there, while the same call with `-A` comes back empty under
+# the same identity. That silently broke --scope=namespace (and the
+# interactive "pick from a list" path) for every RBAC-segregated account -
+# the same class of gap already fixed for operator-pod discovery above, just
+# missed here since this is an earlier, separate discovery step.
+#
+# Fix: when a specific namespace is already known (--namespace was given, so
+# --scope=namespace or --scope=single), and the -A sweep came back empty,
+# retry with a namespace-scoped query before giving up - this needs only
+# that one namespace's RBAC, exactly what a restricted account's RoleBinding
+# already grants. --scope=single doesn't need this (it never used
+# ALL_CLUSTERS_RAW to begin with), but --scope=namespace does.
+if [ ${#ALL_CLUSTERS_RAW[@]} -eq 0 ] && [ -n "$PRESET_NAMESPACE" ]; then
+    collect_lines ALL_CLUSTERS_RAW <<< "$("$KCMD" get "$CLUSTER_RES" -n "$PRESET_NAMESPACE" --no-headers \
+        -o custom-columns="NS:.metadata.namespace,NAME:.metadata.name" 2>/dev/null)"
+fi
+
 if [ -n "$PRESET_SCOPE" ]; then
     # Non-interactive path - shared across CNP/CNPG/PGD4K since the cluster
     # discovery above is identical for all three variants. This is what
@@ -517,6 +539,10 @@ if [ -n "$PRESET_SCOPE" ]; then
         all)
             if [ ${#ALL_CLUSTERS_RAW[@]} -eq 0 ]; then
                 echo "ERROR: --scope=all given but no ${VARIANT_LABEL} clusters were auto-detected in this context." >&2
+                echo "       If this account only has namespace-scoped access (no cluster-wide list" >&2
+                echo "       permission on the ${VARIANT_LABEL} Cluster CRD), --scope=all cannot discover" >&2
+                echo "       clusters outside what it can list cluster-wide - try --scope=namespace" >&2
+                echo "       --namespace=<name> or --scope=single instead." >&2
                 exit 1
             fi
             for entry in "${ALL_CLUSTERS_RAW[@]}"; do
