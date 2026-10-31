@@ -20,7 +20,29 @@ the README's "Checking for Updates & Upgrading" section for how to update.
 ## [Unreleased]
 
 Nothing pending yet — this section fills in as changes are made after
-1.3.0.
+1.3.1.
+
+## [1.3.1] - 2026-10-31
+
+Feedback on 1.3.0 surfaced one more spot with the same RBAC-segregated-access
+problem that release was all about fixing — this time in cluster discovery
+itself, not the operator-pod search.
+
+- Fixed: `--scope=namespace` and `--scope=all` relied on a single
+  cluster-wide listing of every cluster (`kubectl get <cluster-crd> -A`) to
+  figure out what's there, then filtered it down. Under RBAC-segregated
+  access, that cluster-wide call comes back empty even when the account can
+  list clusters just fine within its own namespace — so both scopes reported
+  "no clusters found" when there were several sitting right there.
+  `--scope=single` was never affected, since it already takes an explicit
+  namespace and cluster name and skips discovery entirely. `--scope=namespace`
+  now retries with a namespace-scoped listing when the cluster-wide one comes
+  back empty, the same fix already applied to operator-pod discovery in
+  1.3.0 — just missed here, since it's an earlier, separate step. `--scope=all`
+  can't recover on its own (there's no single namespace to fall back to), so
+  it now says plainly that this usually means no cluster-wide list
+  permission, and points to `--scope=namespace` or `--scope=single` instead
+  of leaving it looking like there's nothing out there. (#3)
 
 ## [1.3.0] - 2026-10-28
 
